@@ -1,83 +1,222 @@
-![logo](asset/md/logo.png "logo")
-### 1. About WaveDromGen
+<p align="center"><img src="asset/md/logo.png" width="96" alt="WaveDromGen logo"></p>
 
-WaveDromGen is a GUI digital timing tool based on [wavedrom](https://wavedrom.com)，it's more convenience than wavedrom because WaveDromGen don't need to code, just click on canvas, and what you see is what you get, that's why WaveDromGen is more suitable for drawing complex waveform and adjusting them. If you need, you can also code in WaveDromGen, like wavedrom.
+# WaveDromGen v2
 
-### 2. Features
-- Drawing waveform in GUI，coding or ascii waveform.
-- Drawing digital waveform in style of wavedrom, and output database(.json) is same as wavedrom text.
-- Save as json, png and svg.
+**A GUI digital timing-diagram editor with WaveDrom-compatible rendering, a live JSON editor and direct waveform manipulation.**
 
-### 3. Directory Structure
-```commandline
-│  main.py                  # main entry
-│  package2exe.py           # package code to exe
-├─asset                     # image asset
-└─WaveDromGen# 
-        language.py         # UI language dict
-        WavedromASCII.py    # wavedrom to ascii
-        WaveDromCtrl.py     # contoller
-        WaveDromDB.py       # datebase model
-        WaveDromUI.py       # UI top
-        WaveImageDB.py      # icon binary database, for package all into exe
-        WaveNote.py         # waveform editor in text
-        __init__.py
+![WaveDromGen v2 main window](asset/md/v2_main.png)
+
+WaveDromGen lets you draw timing diagrams visually, edit the underlying WaveJSON at the same time, and keep both views in sync. The waveform renderer uses WaveDrom's own skin geometry, so exported diagrams look like the diagrams produced by [WaveDrom](https://wavedrom.com) while every cell remains interactive.
+
+> 中文说明：[README_cn.md](README_cn.md)
+
+---
+
+## Highlights
+
+| | Feature |
+|---|---|
+| ✏️ | **Inline editing** — double-click a signal name or a bus `data` label, type, and press <kbd>Enter</kbd> / <kbd>Tab</kbd> to jump straight to the next name/data field. |
+| ↕️ | **Drag to reorder** — drag signals by the left gutter; a drop line shows exactly where the signal will be inserted. |
+| ↔️ | **Split views** — Wave above/below the editor, side-by-side, or either pane alone. Valid JSON renders live; waveform edits rewrite the JSON. |
+| ⏱️ | **Clock auto-extension** — lanes whose names contain `clk` or `clock` are stretched to the longest signal automatically. |
+| ➕ | **Signal editing** — add, insert, delete, duplicate, copy and paste signals, all with configurable shortcuts. |
+| 🖱️ | **Range waveform editing** — drag-select any block of cells and type WaveDrom characters (`0 1 x z = u d p P n N l L h H 2..9 | .`) to paint the whole block. |
+| ⌨️ | **Configurable shortcuts** — 60 actions, keyboard capture, conflict detection, presets and saving in Preferences. |
+| 🎨 | **Polished UI** — light/dark themes, English/中文 UI, zoom, time ruler, selection, context menus, recent files and a compact editor. |
+| 🧩 | **WaveJSON compatible** — skins, `period`, `phase`, `data`, `node`, `edge`, `head`/`foot`, unknown fields preserved. |
+| 🪶 | **Lightweight text editor** — line numbers, current-line highlight, JSON/JSON5 highlighting, smart indent, find/replace, format and inline error markers. |
+
+![Inline data-label editing](asset/md/v2_inline_edit.png)
+
+---
+
+## Install and run
+
+Requirements: **Python 3.10+**.
+
+```bash
+git clone https://github.com/Nymph-K/wavedromgen.git
+cd wavedromgen
+python -m pip install -r requirements.txt
+python main.py
 ```
-![structure](asset/md/struct_en.png "soft structure")
 
-### 5. Installation
-You can install in below 2 ways:
+Open a diagram directly:
 
-**Way 1**：[Download the release version](https://github.com/blueyesess/WaveDromGen/releases), then click exe to run it（just for windows now）.
+```bash
+python main.py examples/demo.json
+```
 
-**Way 2**：Download python source code：
-   1. git clone https://github.com/blueyesess/WaveDromGen.git
-   2. pip install -r requirement
-   3. python main.py
+On Windows you can build a single executable with PyInstaller:
 
-### 6. Usage
-#### 6.1 Wave View
-![ui](asset/md/ui_en.png "ui")
+```bash
+python -m pip install pyinstaller
+python package2exe.py
+```
 
-1. **Menu**: basic menu functon
-2. **View**：
-	- Wave：draw waveform by clicking canvas.
-	- Editor：draw waveform by coding text.
-	- Ascii：can't edit，output ascii waveform in realtime.
-3. **Wave Toolbar**
-	- **clk (clock):** in clk mode, clicking on the canvas will draw clock waveform. Clicking same position more than one time will adjust clock sensitive as below: **high level -> pos edge -> low level -> neg edge**.
-    - **sig (single-bit signal):** in sig mode, clicking on the canvas will draw single bit low . Click same position again to go high.
-    - **bus (muti-bit signal):** in bus mode, clicking on the canvas will draw bus tag. Click same position again to cancel.
-    - **x (no care signal):** in x mode, clicking on the canvas will draw x tag. Click same position again to cancel.
-    - **z (high impedance):** in bus mode, clicking on the canvas will draw z tag. Click same position again to cancel.
-    - **sel (select):** in sel mode, there are 4 usages according click position.
-      1. Clicking on non-waveform zone on the canvas will add the number of rows and columns. 
-      2. Dragging the waveform up or down will adjust the row index.
-      3. Holding down CTRL while dragging a waveform up or down will copy the corresponding waveform.
-      4. Dragging the waveform left and right will move the waveform laterally.
-    - **t (text):** in t mode, clicking signal name or bus tag could edit description.
-    - **clr (clear):** in clr mode, clicking waveform on canvas will clear all data about this signal.
+The executable is written to `dist/WaveDromGen.exe`.
 
-#### 6.2 Editor
+---
 
-![ui2](asset/md/ui2_en.png "ui2")
+## The interface
 
-1. **Editor Toolbar**
-   - **render：** render the editor text to generate waveform.
-   - **copy：** copy what select in editor.
-   - **paste：** paste clipboard in editor.
-   - **undo**；undo last operation in editor.
-   - **redo**；redo last operation in editor.
-   - **find**；find in editor.
-2. **Editor：** edit wavedrom in text, see [wavedrom](https://wavedrom.com/tutorial.html) for details.
+- **Menu bar** — File, Edit, Signal, View, Tools, Help.
+- **Main toolbar** — file actions, undo/redo, signal operations, view modes, zoom, theme, settings.
+- **Tool rail** — Select, Clock, Signal, Bus, Unknown, High-Z, Gap, Text, Clear and Node tools.
+- **Wave canvas** — a time ruler, signal gutter with drag handles, snap-to-cell selection and inline label editors.
+- **WaveJSON panel** — live editor with a `Live` badge, apply/format/wrap/copy buttons and an error banner.
+- **Status bar** — active cell, selection, sync state, signal count and zoom.
 
-### 7. Demo
-![demo](asset/md/demo.gif "demo")
+The splitter between the waveform and editor remembers its size. Use **View → Split Top / Bottom** (<kbd>Ctrl</kbd>+<kbd>3</kbd>) or **Split Left / Right** (<kbd>Ctrl</kbd>+<kbd>4</kbd>); <kbd>Ctrl</kbd>+<kbd>1</kbd> shows only the waveform and <kbd>Ctrl</kbd>+<kbd>2</kbd> only the editor.
 
+![Dark theme](asset/md/v2_dark.png)
 
-### 8. Donate
-If you like WaveDromGen，please star it, or choose to buy a coffee for supporting me.
+---
 
-![pay](asset/md/pay.png "pay")
+## Editing guide
 
+### Names and data labels
 
+Double-click a signal name or a bus label, or press <kbd>F2</kbd> on the active cell.
+
+- <kbd>Enter</kbd> / <kbd>Tab</kbd> — commit and edit the next name/data field.
+- <kbd>Shift</kbd>+<kbd>Tab</kbd> — commit and edit the previous field.
+- <kbd>Esc</kbd> — cancel.
+
+Empty bus segments show a dashed `data` placeholder: double-click it to create the label.
+
+### Selecting and painting cells
+
+Click a cell, drag to select a rectangle, or use <kbd>Shift</kbd>+arrows / <kbd>Ctrl</kbd>+<kbd>A</kbd> to extend the selection. Typing a WaveDrom character applies it to **every selected cell**:
+
+| Character | Meaning |
+|---|---|
+| `0`, `1` | Low / high level |
+| `.` | Continue the previous state |
+| `x` | Unknown / don't care |
+| `z` | High impedance |
+| `=` | Data bus; consumes the next `data` label |
+| `2`–`9` | Data bus with a WaveDrom colour |
+| `p`, `P` | Positive-edge clock (with edge marker for `P`) |
+| `n`, `N` | Negative-edge clock (with edge marker for `N`) |
+| `l`, `L` | Low clock phase (with marker for `L`) |
+| `h`, `H` | High clock phase (with marker for `H`) |
+| `u`, `d` | Bus up/down transition |
+| `\|` | Gap marker |
+
+When a single cell is selected, typing advances the cursor to the next cell (configurable). Use **Edit → Copy Cells** / **Paste Cells** for blocks of characters, and <kbd>Del</kbd> to turn selected cells back into `.` (continue).
+
+### Clocks
+
+Any signal whose name contains `clk` or `clock` is kept aligned with the longest signal. A clock written as `p.......` is simply extended with dots; rectangular `0`/`1` clocks are tiled with their repeating period. Toggle this in **Preferences → Behaviour**, or run **Signal → Extend Clocks to Longest**.
+
+### Signals (lanes)
+
+| Action | Default shortcut |
+|---|---|
+| Insert above | <kbd>Insert</kbd> |
+| Insert below | <kbd>Ctrl</kbd>+<kbd>Insert</kbd> |
+| Add at end | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> |
+| Duplicate | <kbd>Ctrl</kbd>+<kbd>D</kbd> |
+| Copy / cut / paste | <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> |
+| Delete | <kbd>Ctrl</kbd>+<kbd>Delete</kbd> |
+| Move up / down | <kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>Alt</kbd>+<kbd>↓</kbd> |
+| Clear signal | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Delete</kbd> |
+
+Click a row in the left gutter to select it, <kbd>Shift</kbd>+click to select a range, and drag to reorder. Row copy/paste uses the system clipboard, so WaveJSON signals can be moved between windows.
+
+### Live JSON
+
+![Shortcut settings](asset/md/v2_shortcuts.png)
+
+The editor accepts strict JSON and relaxed JSON5 (comments, single quotes, unquoted keys and trailing commas). Valid content is applied after a short debounce; invalid content keeps the last valid waveform and shows the error line and column. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> applies immediately, and **Format JSON** (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>) pretty-prints the document.
+
+Use the **Live** badge/button or **Tools → Toggle Live JSON Sync** to switch between live and manual application. In manual mode, valid text is still applied when you leave the editor.
+
+### More shortcuts
+
+Every action can be rebound in **Preferences → Shortcuts**. The table shows defaults; press a key combination in the shortcut field, up to two combinations per action. Conflicts are highlighted before saving.
+
+A few useful defaults:
+
+- <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> — undo / redo (routes to the focused editor or waveform)
+- <kbd>Ctrl</kbd>+<kbd>S</kbd> / <kbd>Ctrl</kbd>+<kbd>O</kbd> / <kbd>Ctrl</kbd>+<kbd>N</kbd> — save / open / new
+- <kbd>Ctrl</kbd>+<kbd>f</kbd> / <kbd>Ctrl</kbd>+<kbd>h</kbd> — find / replace in the JSON editor
+- <kbd>Ctrl</kbd>+<kbd>0</kbd> / <kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> — reset / zoom in / zoom out
+- <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> — toggle dark mode
+- <kbd>F1</kbd> — quick help and full shortcut reference
+
+### Skins and export
+
+**View → Skin** switches between the official `default`, `lowkey`, `narrow` and `dark` skins. **View → Horizontal Scale** changes WaveDrom's `hscale`. Export PNG/SVG from the File menu; **Copy Diagram as Image** puts a high-resolution render on the clipboard.
+
+### Relations and ASCII
+
+Use the **Node** tool to place a one-character node marker on a waveform cell, then **Tools → Relation Editor** to add edges such as `a~>b setup`. The **ASCII Preview** shows a compact terminal-friendly rendering, and **Copy ASCII** puts it on the clipboard.
+
+---
+
+## WaveJSON compatibility
+
+WaveDromGen v2 preserves the WaveJSON fields it understands and unknown fields it does not. It supports:
+
+- `signal` lanes with `name`, `wave`, `data`, `node`, `period`, `phase` and extra fields;
+- `config.hscale`, `config.skin`, `config.marks`;
+- `edge` relations, basic `head`/`foot` text and tick/tock labels;
+- nested signal **groups are flattened for editing** (a note is shown after opening such a file); a warning is displayed rather than silently losing the lanes.
+
+The JSON editor accepts JSON5 for convenience. Saving always writes canonical UTF-8 JSON.
+
+---
+
+## Project layout
+
+```text
+WaveDromGen/
+  app.py             Qt main window, actions, menus and file I/O
+  waveview.py        interactive canvas, inline editors, selection and drag
+  renderer.py        QPainter waveform/edge renderer and PNG export helper
+  layout.py          geometry, hit testing, data-label targets and inline-edit targets
+  model.py           WaveJSON document model, history, clock rules and JSON5 parsing
+  wavedrom_render.py Python port of WaveDrom's brick/marker algorithm
+  skins.py           skin loading and exact SVG-symbol drawing
+  svgpath.py         minimal SVG path parser
+  editor.py          lightweight JSON editor (line numbers, highlighting, find/replace)
+  shortcuts.py       action registry, default keys and conflict detection
+  settings.py        persisted preferences (~/.config or %APPDATA%)
+  theme.py           light/dark QSS, palette and fonts
+  icons.py           generated vector icons
+  dialogs.py         preferences, shortcuts, properties, relations, ASCII and about
+  ascii_render.py    compact ASCII preview
+  resources/         skins.json + app icon (MIT WaveDrom skin data)
+examples/            ready-to-open WaveJSON demos
+tests/               unit and Qt GUI tests
+```
+
+The waveform renderer is a direct port of WaveDrom's brick and data-marker algorithm, using the official skin symbols. That is why the diagram geometry matches WaveDrom exactly while remaining fully interactive.
+
+---
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The suite covers the WaveDrom brick port, clock extension, JSON/JSON5 handling, undo/redo, settings and shortcuts, plus offscreen GUI tests for inline editing, drag/drop ordering, range painting, signal clipboard operations, live JSON, split views, themes, save/reopen and PNG/SVG export.
+
+---
+
+## Version history and credits
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+- Original WaveDromGen by **Henson / blueyesess** and contributors: <https://github.com/blueyesess/wavedromgen>
+- WaveDrom geometry and skin symbols by **Aliaksei Chapyzhenka** and contributors, MIT licence: <https://github.com/wavedrom/wavedrom>
+- Qt bindings: [PySide6](https://doc.qt.io/qtforpython/) (LGPLv3)
+- JSON5 parsing: [json5](https://github.com/dpranke/pyjson5) (MIT)
+
+This v2 code is released under the MIT licence. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+If you find WaveDromGen useful, a star is appreciated. The v1 Tkinter implementation remains available in the repository history.
