@@ -9,7 +9,7 @@ from typing import Iterable
 from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QFont, QFontMetricsF
 
-from .model import SignalRow, WaveDocument
+from .model import GroupSpan, SignalRow, WaveDocument
 from .skins import Skin, font_for_skin
 from .wavedrom_render import (
     BRICK_SIZE,
@@ -19,6 +19,9 @@ from .wavedrom_render import (
     BrickLayout,
     lane_layout,
 )
+
+GROUP_LEVEL_WIDTH = 20.0  # px per nesting level, matches WaveDrom's 20px socket
+MAX_SELECTION_COLUMNS = 512
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,26 @@ class EditTarget:
 
 
 @dataclass
+class GroupLayout:
+    """Rendered geometry of one signal group bracket."""
+
+    span: GroupSpan
+    x: float
+    top: float
+    bottom: float
+    name_x: float
+    name_rect: QRectF
+    selected: bool = False
+
+    @property
+    def name(self) -> str:
+        value = self.span.group.name
+        if isinstance(value, (list, tuple)):
+            return _label_text(value)
+        return self.span.group.display_name
+
+
+@dataclass
 class RowLayout:
     index: int
     row: SignalRow
@@ -61,6 +84,8 @@ class RowLayout:
     row_rect: QRectF
     char_width: float
     char_x0: float
+    depth: int = 0
+    handle_x: float = 0.0
 
     def char_at_x(self, x: float) -> int:
         if self.char_width <= 0:
@@ -97,6 +122,7 @@ class DiagramLayout:
     skin: Skin | None = None
     chrome: bool = True
     placeholder: bool = True
+    extra_units: int = 0
 
     # computed
     width: float = 0.0
@@ -112,6 +138,12 @@ class DiagramLayout:
     head_height: float = 0.0
     foot_height: float = 0.0
     rows: list[RowLayout] = field(default_factory=list)
+    groups: list[GroupLayout] = field(default_factory=list)
+    group_column_width: float = 0.0
+    group_origin: float = 0.0
+    group_level_width: float = 0.0
+    max_depth: int = 0
+    row_no_width: float = 0.0
     name_font: QFont | None = None
     data_font: QFont | None = None
     name_metrics: QFontMetricsF | None = None
@@ -124,6 +156,7 @@ class DiagramLayout:
 
             self.skin = get_skin(self.doc.skin_name())
         self.zoom = max(0.35, min(4.0, float(self.zoom)))
+        self.extra_units = max(0, int(self.extra_units))
         self.name_font = font_for_skin(self.skin, self.zoom)
         self.data_font = font_for_skin(self.skin, self.zoom)
         self.name_metrics = QFontMetricsF(self.name_font)
@@ -138,18 +171,31 @@ class DiagramLayout:
         self.time_unit_width = 40.0 * hscale * z
         self.row_height = ROW_HEIGHT * z
         self.char_width_base = self.time_unit_width
+        self.group_level_width = GROUP_LEVEL_WIDTH * z
+
+        spans = doc.group_spans()
+        self.max_depth = max((span.depth + 1 for span in spans), default=0)
+        self.row_no_width = 34.0 * z if self.chrome else 0.0
+        self.group_origin = self.row_no_width + 4.0 * z
+        self.group_column_width = (
+            (self.max_depth * self.group_level_width + 8.0 * z) if self.max_depth else 0.0
+        )
 
         # Measure the widest name.
         max_name = 0.0
         for row in doc.rows:
-            text = row.name if row.name else ("signal" if self.placeholder else "")
+            text = row.name
+            if not text and self.placeholder and row.shows_placeholder_name:
+                text = "signal"
             max_name = max(max_name, self.name_metrics.horizontalAdvance(text))
-        row_no_width = 34.0 * z if self.chrome else 0.0
         drag_width = 16.0 * z if self.chrome else 0.0
         name_pad = 22.0 * z
-        self.gutter_width = max(110.0 * z, row_no_width + drag_width + max_name + name_pad)
+        chrome_width = self.row_no_width + self.group_column_width + drag_width + name_pad
+        self.gutter_width = max(110.0 * z, chrome_width + max_name)
         if not self.chrome:
-            self.gutter_width = max(70.0 * z, max_name + name_pad)
+            self.gutter_width = max(
+                70.0 * z, self.group_column_width + max_name + name_pad
+            )
         self.wave_origin = self.gutter_width
 
         head = doc.head
@@ -176,14 +222,15 @@ class DiagramLayout:
             slot_top = self.rows_top + index * self.row_height
             char_width = self.time_unit_width * max(1, bricks.period)
             char_x0 = self.wave_origin + bricks.x_offset * BRICK_SIZE * z
-            name_width = max(60.0 * z, self.name_metrics.horizontalAdvance(row.name) + 18 * z)
             name_right = self.wave_origin - 8.0 * z
+            name_left = self.row_no_width + self.group_column_width + drag_width
             name_rect = QRectF(
-                max(row_no_width + drag_width + 2 * z, name_right - name_width),
+                name_left,
                 slot_top + 3.0 * z,
-                name_width,
+                max(24.0 * z, name_right - name_left),
                 self.row_height - 6.0 * z,
             )
+            handle_x = name_left - 6.0 * z if self.chrome else 0.0
             row_layout = RowLayout(
                 index=index,
                 row=row,
@@ -194,12 +241,14 @@ class DiagramLayout:
                 row_rect=QRectF(0, slot_top, 0, self.row_height),
                 char_width=char_width,
                 char_x0=char_x0,
+                depth=doc.group_depth(index),
+                handle_x=max(self.row_no_width + 4.0 * z, handle_x),
             )
             row_layout.data_targets = self._data_targets(row_layout)
             self.rows.append(row_layout)
 
         self.time_units = max(1, int(math.ceil(max_time)))
-        self.display_units = self.time_units + (2 if self.chrome else 0)
+        self.display_units = self.time_units + (2 if self.chrome else 0) + self.extra_units
         wave_width = (max_bricks * BRICK_SIZE + BRICK_SIZE) * z
         time_width = self.time_unit_width * (self.display_units + 0.5)
         content_width = max(wave_width, time_width)
@@ -212,6 +261,30 @@ class DiagramLayout:
             + self.foot_height
             + 18.0 * z
         )
+        self.groups = self._build_groups(spans)
+
+    def _build_groups(self, spans: list[GroupSpan]) -> list[GroupLayout]:
+        z = self.zoom
+        groups: list[GroupLayout] = []
+        for span in spans:
+            if span.start >= len(self.rows) or span.end >= len(self.rows):
+                continue
+            top = self.rows[span.start].slot_top + 4.0 * z
+            bottom = self.rows[span.end].slot_top + self.row_height - 4.0 * z
+            x = self.group_origin + (span.depth + 1) * self.group_level_width
+            name_x = x - 9.0 * z
+            name_rect = QRectF(name_x - 8.0 * z, top, 16.0 * z, max(10.0, bottom - top))
+            groups.append(
+                GroupLayout(
+                    span=span,
+                    x=x,
+                    top=top,
+                    bottom=bottom,
+                    name_x=name_x,
+                    name_rect=name_rect,
+                )
+            )
+        return groups
 
     def _data_targets(self, row_layout: RowLayout) -> list[DataTarget]:
         layout = row_layout.bricks
@@ -284,7 +357,35 @@ class DiagramLayout:
 
     def is_name_area(self, x: float, y: float) -> bool:
         row = self.row_at(y)
-        return row is not None and x < self.wave_origin - 2.0 and x >= self.gutter_width - row.name_rect.width() - 8
+        return row is not None and x < self.wave_origin - 2.0 and x >= row.name_rect.left()
+
+    def is_group_area(self, x: float, y: float) -> bool:
+        return (
+            self.max_depth > 0
+            and self.row_no_width - 2 <= x < self.row_no_width + self.group_column_width
+            and self.row_at(y) is not None
+        )
+
+    def group_at(self, x: float, y: float) -> GroupLayout | None:
+        """Innermost group under a point in the group gutter."""
+        row = self.row_at(y)
+        if row is None:
+            return None
+        candidates = [
+            group
+            for group in self.groups
+            if group.span.start <= row.index <= group.span.end
+        ]
+        if not candidates:
+            return None
+        # Clicking further left selects the outer group, further right the
+        # deeper nested one, mirroring how the brackets are drawn.
+        candidates.sort(key=lambda group: group.x)
+        level = 0
+        if self.group_level_width > 0:
+            level = int(max(0.0, (x - self.group_origin) // self.group_level_width))
+        level = max(0, min(level, len(candidates) - 1))
+        return candidates[level]
 
     def cell_at(self, x: float, y: float) -> tuple[int, int] | None:
         row = self.row_at(y)
@@ -310,6 +411,10 @@ class DiagramLayout:
         index = int(round(rel / self.row_height)) if self.row_height else 0
         return max(0, min(index, len(self.rows)))
 
+    def max_column(self) -> int:
+        """Highest selectable column (empty cycles to the right included)."""
+        return max(MAX_SELECTION_COLUMNS, self.display_units + 8)
+
     # ------------------------------------------------------------------
     # Geometry helpers
     # ------------------------------------------------------------------
@@ -319,6 +424,7 @@ class DiagramLayout:
         row = self.rows[row_index]
         if clamp and row.row.wave:
             col = max(0, min(col, len(row.row.wave) - 1))
+        col = max(0, min(col, self.max_column()))
         return row.char_rect(col, self.row_height)
 
     def selection_rect(self, selection) -> QRectF | None:
@@ -406,6 +512,29 @@ class DiagramLayout:
         index = max(0, min(index + delta, len(targets) - 1))
         return targets[index]
 
+    def next_target_of_kind(self, current: EditTarget | None, kind: str, delta: int = 1) -> EditTarget | None:
+        """Next edit target of ``kind`` in document order, wrapping around."""
+        targets = self.edit_targets()
+        if not targets:
+            return None
+        same = [target for target in targets if target.kind == kind] or targets
+        if current is None:
+            return same[0]
+        order = {id(target): index for index, target in enumerate(targets)}
+        position = order.get(id(current))
+        if position is None:
+            for index, target in enumerate(targets):
+                if target.key == current.key:
+                    position = index
+                    break
+        if position is None:
+            return same[0] if delta > 0 else same[-1]
+        if delta > 0:
+            later = [target for target in same if order[id(target)] > position]
+            return later[0] if later else same[0]
+        earlier = [target for target in same if order[id(target)] < position]
+        return earlier[-1] if earlier else same[-1]
+
     def data_target(self, row_index: int, x: float) -> DataTarget | None:
         if row_index < 0 or row_index >= len(self.rows):
             return None
@@ -458,22 +587,23 @@ def _run_for_marker(runs: list[tuple[int, int, float]], marker: float) -> tuple[
 
 
 def _label_text(value) -> str:
+    return _label_text_raw(value).strip()
+
+
+def _label_text_raw(value) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value.strip()
+        return value
     if isinstance(value, (list, tuple)):
         if not value:
             return ""
         if isinstance(value[0], str):
-            parts = []
-            for item in value[1:]:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, (list, tuple)):
-                    parts.append(_label_text(item))
-            return "".join(parts).strip()
-    return ""
+            return "".join(_label_text_raw(item) for item in value[1:])
+        return "".join(_label_text_raw(item) for item in value)
+    if isinstance(value, dict):
+        return ""
+    return str(value)
 
 
 def _has_ticks(section: dict) -> bool:

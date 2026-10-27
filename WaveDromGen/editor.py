@@ -131,6 +131,8 @@ class CodeEditor(QPlainTextEdit):
 
     applyRequested = Signal()
 
+    WAVE_VALUE_RE = re.compile(r'"wave"\s*:\s*"((?:\\.|[^"\\])*)"')
+
     def __init__(self, theme: Theme, *, font_size: float = 10.5, indent: int = 2):
         super().__init__()
         self.setObjectName("CodeEditor")
@@ -142,6 +144,8 @@ class CodeEditor(QPlainTextEdit):
         self._search_selections: list = []
         self._current_line_selection = None
         self._error_selection = None
+        self._wave_selection = None
+        self._wave_cursor = None
         self.line_number_area = LineNumberArea(self)
         self.setFrameShape(QPlainTextEdit.NoFrame)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
@@ -267,8 +271,66 @@ class CodeEditor(QPlainTextEdit):
             error_sel.format = err_format
             self._error_selection = error_sel
             selections.append(error_sel)
+        if self._wave_selection is not None:
+            selections.append(self._wave_selection)
         selections.extend(self._search_selections)
         self.setExtraSelections(selections)
+
+    # ------------------------------------------------------------------
+    # Wavedrom "wave" line focus (canvas -> editor synchronisation)
+    # ------------------------------------------------------------------
+    def wave_value_ranges(self) -> list[tuple[int, int]]:
+        """Text positions of every ``"wave": "..."`` value in the document."""
+        revision = self.document().revision()
+        if getattr(self, "_wave_cache_rev", None) == revision and getattr(self, "_wave_cache", None):
+            return self._wave_cache
+        text = self.toPlainText()
+        ranges = [(match.start(1), match.end(1)) for match in self.WAVE_VALUE_RE.finditer(text)]
+        self._wave_cache = ranges
+        self._wave_cache_rev = revision
+        return ranges
+
+    def clear_wave_focus(self) -> None:
+        if self._wave_selection is None and self._wave_cursor is None:
+            return
+        self._wave_selection = None
+        self._wave_cursor = None
+        self._on_cursor_moved()
+
+    def focus_wave_line(self, row_index: int, char_start: int = -1, char_end: int = -1) -> bool:
+        """Scroll to a lane's ``wave`` value and highlight the selected cycles."""
+        ranges = self.wave_value_ranges()
+        if row_index < 0 or row_index >= len(ranges):
+            self.clear_wave_focus()
+            return False
+        value_start, value_end = ranges[row_index]
+        if char_start < 0 or char_end < 0:
+            start = value_start
+            end = value_end
+        else:
+            length = value_end - value_start
+            start = value_start + max(0, min(char_start, length))
+            end = value_start + max(0, min(char_end + 1, length))
+            if end <= start:
+                end = min(value_end, start + 1)
+        selection = QTextEditExtraSelection()
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        selection.cursor = cursor
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(self.theme.accent.red(), self.theme.accent.green(), self.theme.accent.blue(), 70))
+        fmt.setUnderlineColor(self.theme.accent)
+        fmt.setUnderlineStyle(QTextCharFormat.SingleUnderline)
+        selection.format = fmt
+        self._wave_selection = selection
+        caret = QTextCursor(self.document())
+        caret.setPosition(start)
+        self._wave_cursor = caret
+        self.setTextCursor(caret)
+        self.centerCursor()
+        self._on_cursor_moved()
+        return True
 
     def _rebuild_search_selections(self) -> None:
         self._search_selections = []
@@ -819,6 +881,7 @@ class JsonPanel(QWidget):
         self.editor.set_text_silently(text, reset_undo=reset_undo)
         self._syncing = False
         self._debounce.stop()
+        self.editor.clear_wave_focus()
 
     def set_live(self, enabled: bool) -> None:
         self.live_enabled = bool(enabled)
@@ -828,6 +891,7 @@ class JsonPanel(QWidget):
     def _on_text_changed(self) -> None:
         if self._syncing:
             return
+        self.editor.clear_wave_focus()
         self.set_error(None)
         self.sync_status.setText(self._t("Editing…", "编辑中…"))
         if self.live_enabled:
@@ -944,3 +1008,10 @@ class JsonPanel(QWidget):
 
     def focus_editor(self) -> None:
         self.editor.setFocus(Qt.OtherFocusReason)
+
+    def focus_wave(self, row_index: int, char_start: int = -1, char_end: int = -1) -> None:
+        """Jump to the lane's ``wave`` line without stealing focus."""
+        self.editor.focus_wave_line(row_index, char_start, char_end)
+
+    def clear_wave_focus(self) -> None:
+        self.editor.clear_wave_focus()

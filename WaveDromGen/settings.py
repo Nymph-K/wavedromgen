@@ -31,8 +31,12 @@ DEFAULTS: dict[str, Any] = {
     "splitter": {"stacked": [0.46, 0.54], "side": [0.58, 0.42]},
     "recent_files": [],
     "last_directory": "",
+    "export_directory": "",
     "shortcuts": {},
     "show_shortcut_help_on_start": False,
+    "link_wave_skin_to_theme": True,
+    "light_skin": "default",
+    "insert_mode_default": True,
 }
 
 

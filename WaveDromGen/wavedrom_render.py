@@ -349,13 +349,20 @@ def _phase_offset(phase: float) -> float:
 
 
 def lane_layout(row, hscale: int = 1) -> BrickLayout:
-    """Build the brick layout for a SignalRow-like object."""
+    """Build the brick layout for a SignalRow-like object.
+
+    Lanes without a ``wave`` string (``{}`` spacer lanes, or lanes that only
+    carry ``node`` markers) render no bricks at all, exactly like WaveDrom.
+    """
     wave = getattr(row, "wave", "") or ""
     if not isinstance(wave, str):
         wave = ""
     period = max(1, int(round(getattr(row, "period", 1) or 1)))
     phase = float(getattr(row, "phase", 0) or 0)
-    bricks, unseen = parse_wave_lane(wave, hscale=hscale, period=period, phase=phase)
+    if wave:
+        bricks, unseen = parse_wave_lane(wave, hscale=hscale, period=period, phase=phase)
+    else:
+        bricks, unseen = [], 0
     markers = find_lane_markers(bricks)
     if hasattr(row, "data_items"):
         try:

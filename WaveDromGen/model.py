@@ -2,14 +2,16 @@
 """Document model for WaveDromGen v2.
 
 The model intentionally mirrors WaveJSON closely: opening a file and saving it
-again must not lose unknown fields, and the live JSON editor must be able to
-round-trip the document exactly (apart from the convenience defaults added to
-newly created rows).
+again must not lose unknown fields, named signal groups, empty lanes or any
+other syntax WaveDrom understands but this editor does not have a dedicated
+widget for.  The live JSON editor must be able to round-trip the document
+exactly (apart from the convenience defaults added to newly created rows).
 """
 from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 import time
 from collections import OrderedDict
@@ -148,6 +150,16 @@ class SignalRow:
         return not self.wave and not self.name and not self.node and not data_items(self.data_value)
 
     @property
+    def is_blank_entry(self) -> bool:
+        """True for a bare ``{}`` lane: no name, no wave, no nodes, no data."""
+        return not self._data
+
+    @property
+    def shows_placeholder_name(self) -> bool:
+        """Only lanes that actually carry a waveform get the "signal" hint."""
+        return bool(self.wave)
+
+    @property
     def char_count(self) -> int:
         return len(self.wave)
 
@@ -159,10 +171,18 @@ class SignalRow:
     def data_items(self) -> list[str]:
         return data_items(self.data_value)
 
-    def set_data_items(self, items: Sequence[str]) -> None:
+    def set_data_items(self, items: Sequence[str], *, as_list: bool | None = None) -> None:
+        """Store the ``data`` array.
+
+        ``as_list=None`` keeps the original spelling (string or array).  GUI
+        editing passes ``as_list=True`` so labels are written as a proper
+        WaveJSON array instead of a space separated string.
+        """
         items = [str(item) for item in items]
         original = self._data.get("data", "")
-        if isinstance(original, (list, tuple)):
+        if as_list is None:
+            as_list = isinstance(original, (list, tuple))
+        if as_list:
             self._data["data"] = items
         else:
             self._data["data"] = " ".join(items)
@@ -174,7 +194,7 @@ class SignalRow:
         while len(items) <= index:
             items.append("")
         items[index] = value
-        self.set_data_items(items)
+        self.set_data_items(items, as_list=True)
 
     # -- geometry helpers --------------------------------------------
     def char_at(self, index: int) -> str:
@@ -236,16 +256,66 @@ class SignalRow:
     def extend_clock(self, target_time_units: float) -> bool:
         if not self.is_clock:
             return False
+        if not self.wave:
+            return False
         new_wave = clock_extension(self, target_time_units)
+        return self._set_wave(new_wave)
+
+    def fit_clock(self, target_time_units: float) -> bool:
+        """Extend *or* shrink a clock lane so it matches ``target_time_units``."""
+        if not self.is_clock or not self.wave:
+            return False
+        new_wave = clock_fitted(self, target_time_units)
+        return self._set_wave(new_wave)
+
+    def _set_wave(self, new_wave: Any) -> bool:
         if not isinstance(new_wave, str) or new_wave == self.wave:
             return False
         self._data["wave"] = new_wave
         if len(self.node) < len(new_wave):
             self._data["node"] = self.node + "." * (len(new_wave) - len(self.node))
+        elif len(self.node) > len(new_wave):
+            self._data["node"] = self.node[: len(new_wave)]
+        return True
+
+    def insert_wave(self, index: int, chars: str = ".") -> bool:
+        """Insert ``chars`` before ``index``, shifting the rest to the right."""
+        if not chars:
+            return False
+        wave = self.wave
+        if not wave:
+            return False
+        index = max(0, min(index, len(wave)))
+        self._data["wave"] = wave[:index] + chars + wave[index:]
+        node = self.node or ""
+        if not node:
+            node = "." * len(wave)
+        index = max(0, min(index, len(node)))
+        self._data["node"] = node[:index] + "." * len(chars) + node[index:]
+        return True
+
+    def delete_wave(self, start: int, end: int) -> bool:
+        """Delete the inclusive character range ``[start, end]``."""
+        wave = self.wave
+        if not wave:
+            return False
+        length = len(wave)
+        start = max(0, min(int(start), length))
+        end = max(start, min(int(end), length - 1))
+        if start >= length or end < start:
+            return False
+        count = end - start + 1
+        self._data["wave"] = wave[:start] + wave[end + 1 :]
+        node = self.node
+        if node:
+            self._data["node"] = node[:start] + node[start + count :]
         return True
 
     # -- serialisation ------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
+        if not self._data:
+            # Preserve bare ``{}`` spacer lanes exactly as written.
+            return {}
         result: OrderedDict[str, Any] = OrderedDict()
         # Keep the familiar WaveDrom field order, then any extra fields.
         for key in ROW_FIELD_ORDER:
@@ -254,36 +324,138 @@ class SignalRow:
         for key, value in self._data.items():
             if key not in result:
                 result[key] = copy.deepcopy(value)
-        if "name" not in result:
-            result["name"] = ""
-        if "wave" not in result:
-            result["wave"] = ""
+        # Rows loaded with only e.g. ``node`` must not gain empty name/wave
+        # keys: WaveDrom treats a missing name/wave as empty too, and keeping
+        # the document untouched makes save/reload a perfect round trip.
+        if ("name" in self._data or "wave" in self._data) and self._data:
+            result.setdefault("name", "")
+            result.setdefault("wave", "")
         return dict(result)
 
     def clone(self) -> "SignalRow":
-        return SignalRow(self.to_dict())
+        return SignalRow(copy.deepcopy(self._data))
+
+    def to_value(self) -> Any:
+        """Serialise for the ``signal`` array (see :meth:`to_dict`)."""
+        return self.to_dict()
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"SignalRow(name={self.name!r}, wave={self.wave!r})"
 
 
-def _flatten_signal_list(items: list[Any], notes: list[str]) -> list[SignalRow]:
-    rows: list[SignalRow] = []
+class Group:
+    """A named WaveDrom signal group: ``["name", {...}, {...}]``."""
+
+    __slots__ = ("name", "children", "preserve_empty")
+
+    def __init__(self, name: Any = None, children: list[Any] | None = None):
+        self.name = name
+        self.children: list[Any] = list(children or [])
+        self.preserve_empty = not self.children
+
+    @property
+    def display_name(self) -> str:
+        if self.name is None:
+            return ""
+        if isinstance(self.name, str):
+            return self.name
+        return str(self.name)
+
+    @property
+    def has_name(self) -> bool:
+        return self.name is not None and bool(str(self.name).strip())
+
+    def to_value(self) -> list[Any]:
+        values: list[Any] = []
+        if self.name is not None:
+            values.append(copy.deepcopy(self.name))
+        values.extend(child.to_value() for child in self.children)
+        return values
+
+    def clone(self) -> "Group":
+        group = Group(copy.deepcopy(self.name), [child.clone() for child in self.children])
+        group.preserve_empty = self.preserve_empty
+        return group
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"Group(name={self.name!r}, children={len(self.children)})"
+
+
+class RawEntry:
+    """An unsupported ``signal`` entry kept verbatim so it is never lost."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any):
+        self.value = copy.deepcopy(value)
+
+    def to_value(self) -> Any:
+        return copy.deepcopy(self.value)
+
+    def clone(self) -> "RawEntry":
+        return RawEntry(self.value)
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"RawEntry({self.value!r})"
+
+
+SignalNode = SignalRow | Group | RawEntry
+
+
+@dataclass(frozen=True)
+class GroupSpan:
+    """Geometry information for one rendered group bracket."""
+
+    group: Group
+    start: int
+    end: int  # inclusive row index
+    depth: int
+
+    @property
+    def row_count(self) -> int:
+        return self.end - self.start + 1
+
+
+def _parse_signal_nodes(items: Sequence[Any]) -> list[SignalNode]:
+    nodes: list[SignalNode] = []
     for item in items:
         if isinstance(item, list):
             if not item:
+                # An empty array carries no information; keep it verbatim.
+                nodes.append(RawEntry([]))
                 continue
-            group = item[0] if isinstance(item[0], str) else ""
-            if group:
-                notes.append(f'Signal group "{group}" was flattened for editing.')
-            rows.extend(_flatten_signal_list(list(item[1:]), notes))
+            first = item[0]
+            if isinstance(first, (str, int, float)) and not isinstance(first, bool):
+                nodes.append(Group(first, _parse_signal_nodes(item[1:])))
+            else:
+                nodes.append(Group(None, _parse_signal_nodes(item)))
         elif isinstance(item, dict):
-            rows.append(SignalRow(item))
+            nodes.append(SignalRow(item))
         elif item is None:
-            rows.append(SignalRow({}))
+            # WaveDrom would fail to render ``null``; show it as a spacer lane
+            # instead of dropping the entry.
+            nodes.append(SignalRow({}))
         else:
-            notes.append(f"Ignored unsupported signal entry: {item!r}")
+            nodes.append(RawEntry(item))
+    return nodes
+
+
+def rows_of_nodes(nodes: Sequence[Any]) -> list[SignalRow]:
+    rows: list[SignalRow] = []
+    for node in nodes:
+        if isinstance(node, Group):
+            rows.extend(rows_of_nodes(node.children))
+        elif isinstance(node, SignalRow):
+            rows.append(node)
     return rows
+
+
+def _node_row_count(node: Any) -> int:
+    if isinstance(node, SignalRow):
+        return 1
+    if isinstance(node, Group):
+        return sum(_node_row_count(child) for child in node.children)
+    return 0
 
 
 def _default_document() -> dict[str, Any]:
@@ -354,7 +526,10 @@ class WaveDocument:
     """Editable WaveJSON document with snapshot based undo/redo."""
 
     def __init__(self, *, auto_extend_clocks: bool = True):
+        # ``signal_tree`` is the source of truth; ``rows`` is a flat view of it.
+        self.signal_tree: list[SignalNode] = []
         self.rows: list[SignalRow] = []
+        self._row_nodes: list[SignalRow] = []
         self.edges: list[Any] = []
         self.config: OrderedDict[str, Any] = OrderedDict()
         self._fields: OrderedDict[str, Any] = OrderedDict()
@@ -403,7 +578,8 @@ class WaveDocument:
         signal = data.get("signal", [])
         if not isinstance(signal, list):
             raise DocumentError('"signal" must be a JSON array')
-        self.rows = _flatten_signal_list(signal, notes)
+        self.signal_tree = _parse_signal_nodes(signal)
+        self._rebuild_rows()
         self.edges = copy.deepcopy(data.get("edge", [])) if isinstance(data.get("edge", []), list) else []
         config = data.get("config", {})
         self.config = OrderedDict(config) if isinstance(config, dict) else OrderedDict()
@@ -416,8 +592,9 @@ class WaveDocument:
                 self._signal_position = index
             self._fields[key] = copy.deepcopy(value)
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._normalise_basics()
+
     def _normalise_basics(self) -> None:
         if not isinstance(self.config, OrderedDict):
             self.config = OrderedDict(self.config)
@@ -470,7 +647,7 @@ class WaveDocument:
         for key in original_order:
             if key.lower() == "signal":
                 if not signal_placed:
-                    result["signal"] = [row.to_dict() for row in self.rows]
+                    result["signal"] = [node.to_value() for node in self.signal_tree]
                     signal_placed = True
                 continue
             if key.lower() == "edge":
@@ -484,7 +661,7 @@ class WaveDocument:
             # Insert at the remembered position rather than always at the end.
             items = list(result.items())
             at = max(0, min(self._signal_position, len(items)))
-            items.insert(at, ("signal", [row.to_dict() for row in self.rows]))
+            items.insert(at, ("signal", [node.to_value() for node in self.signal_tree]))
             result = OrderedDict(items)
         if "edge" not in result:
             result["edge"] = copy.deepcopy(self.edges)
@@ -580,6 +757,276 @@ class WaveDocument:
         self._dirty = False
 
     # ------------------------------------------------------------------
+    # Tree helpers
+    # ------------------------------------------------------------------
+    def _rebuild_rows(self) -> None:
+        self.rows = rows_of_nodes(self.signal_tree)
+        self._row_nodes = list(self.rows)
+
+    def _locate_row(self, row_index: int) -> tuple[list[Any], int] | None:
+        """Return ``(parent_child_list, position)`` for a flat row index."""
+        counter = [0]
+
+        def walk(nodes: list[Any]):
+            for position, node in enumerate(nodes):
+                if isinstance(node, Group):
+                    found = walk(node.children)
+                    if found is not None:
+                        return found
+                elif isinstance(node, SignalRow):
+                    if counter[0] == row_index:
+                        return (nodes, position)
+                    counter[0] += 1
+            return None
+
+        return walk(self.signal_tree)
+
+    def _insert_nodes_at(self, index: int, nodes: Sequence[SignalNode]) -> None:
+        if not nodes:
+            return
+        index = max(0, int(index))
+        if not self.signal_tree or index >= len(self.rows):
+            self.signal_tree.extend(nodes)
+            return
+        located = self._locate_row(index)
+        if located is None:
+            self.signal_tree.extend(nodes)
+            return
+        parent, position = located
+        parent[position:position] = list(nodes)
+
+    def _row_chain(self, row_index: int) -> list[tuple[list[Any], int]]:
+        """Return the (sibling list, position) chain from the root to a row."""
+        chain: list[tuple[list[Any], int]] = []
+        counter = [0]
+
+        def walk(nodes: list[Any]) -> bool:
+            for position, node in enumerate(nodes):
+                chain.append((nodes, position))
+                if isinstance(node, Group):
+                    if walk(node.children):
+                        return True
+                elif isinstance(node, SignalRow):
+                    if counter[0] == row_index:
+                        return True
+                    counter[0] += 1
+                chain.pop()
+            return False
+
+        walk(self.signal_tree)
+        return chain
+
+    def _live_lists(self) -> set[int]:
+        live: set[int] = set()
+
+        def walk(nodes: list[Any]) -> None:
+            live.add(id(nodes))
+            for node in nodes:
+                if isinstance(node, Group):
+                    walk(node.children)
+
+        walk(self.signal_tree)
+        return live
+
+    def _insert_nodes_near(self, chain: Sequence[tuple[list[Any], int]], nodes: Sequence[SignalNode]) -> None:
+        """Insert ``nodes`` where the chain's row used to be.
+
+        After removing rows, the deepest surviving sibling list in the chain is
+        used, so grouping signals that live inside (now empty) groups still
+        produces a group at the right nesting level.
+        """
+        if not nodes:
+            return
+        live = self._live_lists()
+        for sibling_list, position in reversed(chain):
+            if id(sibling_list) in live:
+                position = max(0, min(position, len(sibling_list)))
+                sibling_list[position:position] = list(nodes)
+                return
+        self.signal_tree.extend(nodes)
+
+    def _cancel_empty_group(self, node: Any) -> bool:
+        return isinstance(node, Group) and not node.children and not node.preserve_empty
+
+    def _prune_groups(self, nodes: list[Any] | None = None) -> None:
+        nodes = self.signal_tree if nodes is None else nodes
+        index = 0
+        while index < len(nodes):
+            node = nodes[index]
+            if isinstance(node, Group):
+                self._prune_groups(node.children)
+                if self._cancel_empty_group(node):
+                    del nodes[index]
+                    continue
+            index += 1
+
+    def _collect_nodes(self, selected: set[int]) -> list[SignalNode]:
+        """Deep-copy the selected rows, whole groups included when fully covered."""
+
+        def walk(nodes: Sequence[Any]) -> list[SignalNode]:
+            out: list[SignalNode] = []
+            for node in nodes:
+                if isinstance(node, Group):
+                    rows = rows_of_nodes([node])
+                    if rows and all(self._row_index[row] in selected for row in rows):
+                        out.append(node.clone())
+                    elif any(self._row_index.get(row) in selected for row in rows):
+                        out.extend(walk(node.children))
+                elif isinstance(node, SignalRow):
+                    if self._row_index.get(node) in selected:
+                        out.append(node.clone())
+            return out
+
+        self._row_index = {row: index for index, row in enumerate(self.rows)}
+        return walk(self.signal_tree)
+
+    def _remove_selected(self, selected: set[int]) -> None:
+        """Remove rows from the tree in place (groups are pruned when empty)."""
+
+        def walk(nodes: list[Any]) -> None:
+            index = 0
+            while index < len(nodes):
+                node = nodes[index]
+                if isinstance(node, Group):
+                    walk(node.children)
+                    if not node.children and not node.preserve_empty:
+                        del nodes[index]
+                        continue
+                elif isinstance(node, SignalRow):
+                    if self._row_index.get(node) in selected:
+                        del nodes[index]
+                        continue
+                index += 1
+
+        self._row_index = {row: index for index, row in enumerate(self.rows)}
+        walk(self.signal_tree)
+
+    def _selected_then_rebuild(self, selected: set[int]):
+        """Yield deep copies of the selected nodes, then rebuild ``rows``."""
+        nodes = self._collect_nodes(selected)
+        self._remove_selected(selected)
+        self._rebuild_rows()
+        return nodes
+
+    # ------------------------------------------------------------------
+    # Groups (read only views)
+    # ------------------------------------------------------------------
+    def group_spans(self) -> list[GroupSpan]:
+        spans: list[GroupSpan] = []
+        counter = [0]
+
+        def walk(nodes: Sequence[Any], depth: int) -> None:
+            for node in nodes:
+                if isinstance(node, Group):
+                    start = counter[0]
+                    walk(node.children, depth + 1)
+                    end = counter[0] - 1
+                    if end >= start:
+                        spans.append(GroupSpan(node, start, end, depth))
+                elif isinstance(node, SignalRow):
+                    counter[0] += 1
+
+        walk(self.signal_tree, 0)
+        spans.sort(key=lambda span: (span.start, -span.depth))
+        return spans
+
+    def group_depth(self, row_index: int) -> int:
+        for span in self.group_spans():
+            if span.start <= row_index <= span.end:
+                return span.depth + 1
+        return 0
+
+    def max_group_depth(self) -> int:
+        spans = self.group_spans()
+        return max((span.depth + 1 for span in spans), default=0)
+
+    def span_at_row(self, row_index: int) -> GroupSpan | None:
+        candidates = [span for span in self.group_spans() if span.start <= row_index <= span.end]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda span: span.depth)
+
+    def span_by_group(self, group: Group) -> GroupSpan | None:
+        for span in self.group_spans():
+            if span.group is group:
+                return span
+        return None
+
+    def rename_group(self, row_index: int, name: Any) -> bool:
+        span = self.span_at_row(row_index)
+        if span is None:
+            return False
+        if span.group.name == name:
+            return False
+        self._record("rename-group")
+        span.group.name = copy.deepcopy(name)
+        self._dirty = True
+        return True
+
+    def group_rows(self, indices: Iterable[int], name: Any) -> list[int]:
+        selected = sorted({int(i) for i in indices if 0 <= int(i) < len(self.rows)})
+        if not selected:
+            return []
+        self._record("group")
+        first = selected[0]
+        chain = self._row_chain(first)
+        nodes = self._selected_then_rebuild(set(selected))
+        group = Group(name, list(nodes))
+        group.preserve_empty = False
+        self._insert_nodes_near(chain, [group])
+        self._rebuild_rows()
+        if self.auto_extend_clocks:
+            self.fit_clocks(record=False)
+        self._dirty = True
+        return list(range(first, min(first + len(selected), len(self.rows))))
+
+    def ungroup_rows(self, indices: Iterable[int]) -> list[int]:
+        """Dissolve the outermost fully selected groups (one level)."""
+        selected = {int(i) for i in indices if 0 <= int(i) < len(self.rows)}
+        if not selected:
+            return []
+        targets: list[Group] = []
+
+        def find(nodes: list[Any], parent_selected: bool) -> None:
+            for node in nodes:
+                if not isinstance(node, Group):
+                    continue
+                rows = rows_of_nodes([node])
+                fully = bool(rows) and all(self._row_index[row] in selected for row in rows)
+                if fully and not parent_selected:
+                    targets.append(node)
+                elif not fully:
+                    find(node.children, False)
+
+        self._row_index = {row: index for index, row in enumerate(self.rows)}
+        find(self.signal_tree, False)
+        if not targets:
+            return []
+        changed: list[int] = []
+        for group in targets:
+            rows = rows_of_nodes([group])
+            changed.extend(self._row_index[row] for row in rows)
+        self._record("ungroup")
+        targets_set = {id(group) for group in targets}
+
+        def dissolve(nodes: list[Any]) -> None:
+            index = 0
+            while index < len(nodes):
+                node = nodes[index]
+                if isinstance(node, Group):
+                    if id(node) in targets_set:
+                        nodes[index : index + 1] = list(node.children)
+                        continue
+                    dissolve(node.children)
+                index += 1
+
+        dissolve(self.signal_tree)
+        self._rebuild_rows()
+        self._dirty = True
+        first = min(changed)
+        return list(range(first, min(first + len(changed), len(self.rows))))
+
+    # ------------------------------------------------------------------
     # Geometry / stats
     # ------------------------------------------------------------------
     @property
@@ -589,6 +1036,16 @@ class WaveDocument:
     @property
     def time_units(self) -> float:
         return max((row.time_units for row in self.rows), default=0.0)
+
+    def clock_columns(self) -> int:
+        return max((len(row.wave) for row in self.rows if row.is_clock and row.wave), default=0)
+
+    def reference_columns(self) -> int:
+        """Length used for new lanes: the clock length when there is one."""
+        clock = self.clock_columns()
+        if clock:
+            return clock
+        return max(DEFAULT_COLUMNS, self.column_count)
 
     @property
     def name_width(self) -> int:
@@ -633,20 +1090,42 @@ class WaveDocument:
     # ------------------------------------------------------------------
     # Clocks
     # ------------------------------------------------------------------
-    def extend_clocks(self, *, record: bool = True) -> list[int]:
-        """Extend clock lanes to the longest signal (requirement #4)."""
-        if record:
-            self._record("extend-clocks")
-        target = self.time_units
-        changed: list[int] = []
+    def clock_target_units(self) -> float:
+        """Time length a clock should have: the longest non-clock signal."""
+        signal_units = [row.time_units for row in self.rows if row.wave and not row.is_clock]
+        if signal_units:
+            return max(signal_units)
+        return max((row.time_units for row in self.rows if row.is_clock), default=0.0)
+
+    def fit_clocks(self, *, record: bool = True, extend_only: bool = False) -> list[int]:
+        """Keep clock lanes exactly as long as the longest signal lane."""
+        target = self.clock_target_units()
         if target <= 0:
-            return changed
+            return []
+        changed: list[int] = []
+        if record:
+            self._record("fit-clocks")
         for index, row in enumerate(self.rows):
-            if row.is_clock and row.extend_clock(target):
+            if not row.is_clock:
+                continue
+            if extend_only:
+                if row.extend_clock(target):
+                    changed.append(index)
+            elif row.fit_clock(target):
                 changed.append(index)
         if changed:
             self._dirty = True
         return changed
+
+    def extend_clocks(self, *, record: bool = True) -> list[int]:
+        """Extend clock lanes to the longest signal (requirement #4)."""
+        return self.fit_clocks(record=record, extend_only=True)
+
+    def fit_clocks_quiet(self) -> list[int]:
+        """Re-fit clocks after an edit without pushing a second history entry."""
+        if not self.auto_extend_clocks:
+            return []
+        return self.fit_clocks(record=False)
 
     def extend_clock_to_longest(self, index: int) -> bool:
         row = self.row(index)
@@ -662,7 +1141,7 @@ class WaveDocument:
         return ("p" + "." * (columns - 1)) if clock else ("0" + "." * (columns - 1))
 
     def make_row(self, *, name: str = "signal", columns: int | None = None, clock: bool | None = None) -> SignalRow:
-        columns = columns if columns is not None else max(DEFAULT_COLUMNS, self.column_count)
+        columns = columns if columns is not None else self.reference_columns()
         is_clock = clock if clock is not None else clock_like(name)
         return SignalRow(
             OrderedDict(
@@ -686,9 +1165,10 @@ class WaveDocument:
         index = max(0, min(index, len(self.rows)))
         for row in new_rows:
             row.ensure_length(max(1, len(row.wave)))
-        self.rows[index:index] = new_rows
+        self._insert_nodes_at(index, new_rows)
+        self._rebuild_rows()
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
 
     def insert_blank(self, index: int, *, name: str = "signal", clock: bool | None = None) -> int:
@@ -701,16 +1181,25 @@ class WaveDocument:
         self.insert_rows(len(self.rows), [row])
         return len(self.rows) - 1
 
+    def add_spacer_row(self, index: int | None = None) -> int:
+        """Insert a bare ``{}`` spacer lane."""
+        index = len(self.rows) if index is None else max(0, min(index, len(self.rows)))
+        self._record("insert-spacer")
+        self._insert_nodes_at(index, [SignalRow({})])
+        self._rebuild_rows()
+        self._dirty = True
+        return index
+
     def delete_rows(self, indices: Iterable[int]) -> list[int]:
         selected = sorted({i for i in indices if 0 <= i < len(self.rows)})
         if not selected:
             return []
         self._record("delete-row")
-        for index in reversed(selected):
-            del self.rows[index]
-        self._prune_edges()
+        self._selected_then_rebuild(set(selected))
+        self._prune_groups()
+        self._rebuild_rows()
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
         return selected
 
@@ -719,45 +1208,63 @@ class WaveDocument:
         if not selected:
             return []
         self._record("duplicate-row")
+        nodes = self._collect_nodes(set(selected))
         insert_at = selected[-1] + 1
-        clones = [self.rows[i].clone() for i in selected]
-        self.rows[insert_at:insert_at] = clones
+        self._insert_nodes_at(insert_at, [node.clone() for node in nodes])
+        self._rebuild_rows()
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
-        return list(range(insert_at, insert_at + len(clones)))
+        count = sum(1 for node in nodes for _ in rows_of_nodes([node]))
+        return list(range(insert_at, min(insert_at + count, len(self.rows))))
 
     def copy_rows(self, indices: Iterable[int]) -> list[dict[str, Any]]:
-        return [self.rows[i].to_dict() for i in sorted(set(indices)) if 0 <= i < len(self.rows)]
+        self._row_index = {row: index for index, row in enumerate(self.rows)}
+        selected = {i for i in indices if 0 <= i < len(self.rows)}
+        if not selected:
+            return []
+        return [node.to_value() for node in self._collect_nodes(selected) if isinstance(node, SignalRow)]
+
+    def copy_nodes_payload(self, indices: Iterable[int]) -> str:
+        self._row_index = {row: index for index, row in enumerate(self.rows)}
+        selected = {i for i in indices if 0 <= i < len(self.rows)}
+        nodes = self._collect_nodes(selected) if selected else []
+        return json.dumps({"signal": [node.to_value() for node in nodes]}, ensure_ascii=False, indent=2)
 
     def paste_rows(self, payload: Any, index: int | None = None) -> list[int]:
-        rows = _normalise_clipboard_rows(payload)
-        if not rows:
+        nodes = _normalise_clipboard_nodes(payload)
+        if not nodes:
             return []
         self._record("paste-row")
         if index is None:
             index = len(self.rows)
         index = max(0, min(index, len(self.rows)))
-        new_rows = [SignalRow(item) for item in rows]
-        self.rows[index:index] = new_rows
+        self._insert_nodes_at(index, nodes)
+        self._rebuild_rows()
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
-        return list(range(index, index + len(new_rows)))
+        count = len(rows_of_nodes(nodes))
+        return list(range(index, min(index + count, len(self.rows))))
 
     def move_rows(self, indices: Iterable[int], target: int) -> list[int]:
         selected = sorted({i for i in indices if 0 <= i < len(self.rows)})
         if not selected:
             return []
         self._record("move-row")
-        moving = [self.rows[i] for i in selected]
+        nodes = self._collect_nodes(set(selected))
         before = sum(1 for i in selected if i < target)
-        for index in reversed(selected):
-            del self.rows[index]
+        self._remove_selected(set(selected))
+        self._prune_groups()
+        self._rebuild_rows()
         insert_at = max(0, min(target - before, len(self.rows)))
-        self.rows[insert_at:insert_at] = moving
+        self._insert_nodes_at(insert_at, nodes)
+        self._rebuild_rows()
+        if self.auto_extend_clocks:
+            self.fit_clocks(record=False)
         self._dirty = True
-        return list(range(insert_at, insert_at + len(moving)))
+        count = len(rows_of_nodes(nodes))
+        return list(range(insert_at, min(insert_at + count, len(self.rows))))
 
     def move_row_up(self, index: int) -> int:
         if index <= 0 or index >= len(self.rows):
@@ -783,7 +1290,7 @@ class WaveDocument:
         self._record("name")
         row.name = name
         if row.is_clock and self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
         return True
 
@@ -813,12 +1320,12 @@ class WaveDocument:
                 items = items.split()
             items = [str(item) for item in (items or [])]
             if row.data_items() != items:
-                row.set_data_items(items)
+                row.set_data_items(items, as_list=True)
                 changed = True
         if changed:
             row.ensure_length(len(row.wave))
             if self.auto_extend_clocks:
-                self.extend_clocks(record=False)
+                self.fit_clocks(record=False)
             self._dirty = True
         return changed
 
@@ -858,7 +1365,7 @@ class WaveDocument:
             if row.set_wave_char(x, char):
                 changed += 1
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         if changed:
             self._dirty = True
         return changed
@@ -885,13 +1392,84 @@ class WaveDocument:
             if row.set_wave_char(x, char):
                 changed += 1
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         if changed:
             self._dirty = True
         return changed
 
     def clear_cells(self, cells: Iterable[tuple[int, int]]) -> int:
         return self.apply_wave_chars(cells, ".", tag="clear-cells")
+
+    def delete_cells(self, cells: Iterable[tuple[int, int]]) -> int:
+        """Delete waveform characters (cycles) from the selected cells."""
+        grouped: dict[int, set[int]] = {}
+        for y, x in cells:
+            grouped.setdefault(y, set()).add(int(x))
+        if not grouped:
+            return 0
+        self._record("delete-cells")
+        changed = 0
+        for y, cols in grouped.items():
+            row = self.row(y)
+            if row is None or not row.wave:
+                continue
+            for start, end in _runs(sorted(cols)):
+                end = min(end, len(row.wave) - 1)
+                if start > end:
+                    continue
+                if row.delete_wave(start, end):
+                    changed += end - start + 1
+        if self.auto_extend_clocks:
+            self.fit_clocks(record=False)
+        if changed:
+            self._dirty = True
+        return changed
+
+    def insert_cells(
+        self,
+        rows: Iterable[int],
+        column: int,
+        *,
+        count: int = 1,
+        chars: str = ".",
+    ) -> int:
+        """Insert ``count`` waveform cycles before ``column`` in the given lanes."""
+        count = max(1, int(count))
+        chars = (chars or ".") * count
+        targets = sorted({int(r) for r in rows if 0 <= int(r) < len(self.rows)})
+        if not targets:
+            return 0
+        self._record("insert-cells")
+        changed = 0
+        for y in targets:
+            row = self.rows[y]
+            if not row.wave:
+                continue
+            if row.insert_wave(max(0, int(column)), chars):
+                changed += 1
+        if self.auto_extend_clocks:
+            self.fit_clocks(record=False)
+        if changed:
+            self._dirty = True
+        return changed
+
+    def insert_text(self, index: int, column: int, chars: str) -> bool:
+        """Insert typed characters at a column, padding short/empty lanes."""
+        row = self.row(index)
+        if row is None or not chars:
+            return False
+        self._record("insert-text")
+        column = max(0, int(column))
+        if len(row.wave) < column:
+            row.ensure_length(column)
+        if not row.wave:
+            row.ensure_length(max(1, column + len(chars)))
+        changed = row.insert_wave(column, chars)
+        if self.auto_extend_clocks:
+            self.fit_clocks(record=False)
+        if changed:
+            self._dirty = True
+        return changed
 
     def clear_row(self, index: int, *, keep_name: bool = True) -> bool:
         row = self.row(index)
@@ -905,7 +1483,7 @@ class WaveDocument:
         row._data["data"] = ""
         row._data["node"] = "." * length
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
         return True
 
@@ -923,7 +1501,7 @@ class WaveDocument:
             row._data["data"] = ""
             row._data["node"] = "." * max(length, len(row.node), 1)
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
         return len(rows)
 
@@ -992,7 +1570,7 @@ class WaveDocument:
             row._data["wave"] = row.wave + "." * count
             row._data["node"] = row.node + "." * count
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
 
     def delete_columns(self, start: int, count: int = 1) -> None:
@@ -1006,7 +1584,7 @@ class WaveDocument:
             if node:
                 row._data["node"] = node[:start] + node[start + count :]
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
 
     def set_config(self, key: str, value: Any) -> bool:
@@ -1020,8 +1598,77 @@ class WaveDocument:
     def set_hscale(self, value: int) -> None:
         self.set_config("hscale", max(1, min(100, int(value))))
 
-    def set_skin(self, skin: str) -> None:
-        self.set_config("skin", skin)
+    def set_skin(self, skin: str, *, record: bool = True, mark_dirty: bool = True) -> bool:
+        if self.config.get("skin") == skin:
+            return False
+        if record:
+            self._record("config")
+        self.config["skin"] = skin
+        if mark_dirty:
+            self._dirty = True
+        return True
+
+    def set_section(self, name: str, values: dict[str, Any] | None) -> bool:
+        """Replace ``head``/``foot`` (or any top level section) with ``values``."""
+        name = str(name)
+        cleaned: dict[str, Any] = {}
+        for key, value in (values or {}).items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            cleaned[key] = copy.deepcopy(value)
+        if not cleaned:
+            if name not in self._fields:
+                return False
+            self._record("section")
+            del self._fields[name]
+            self._dirty = True
+            return True
+        if self._fields.get(name) == cleaned:
+            return False
+        self._record("section")
+        self._fields[name] = cleaned
+        self._dirty = True
+        return True
+
+    def apply_diagram_settings(
+        self,
+        *,
+        skin: str | None = None,
+        hscale: int | None = None,
+        head: dict[str, Any] | None = None,
+        foot: dict[str, Any] | None = None,
+    ) -> bool:
+        """Apply one batch of diagram settings with a single undo entry."""
+        self._record("diagram-settings")
+        changed = False
+        if skin is not None and self.config.get("skin") != skin:
+            self.config["skin"] = skin
+            changed = True
+        if hscale is not None:
+            hscale = max(1, min(100, int(hscale)))
+            if self.config.get("hscale") != hscale:
+                self.config["hscale"] = hscale
+                changed = True
+        for key, values in (("head", head), ("foot", foot)):
+            if values is None:
+                continue
+            cleaned = {
+                k: copy.deepcopy(v)
+                for k, v in values.items()
+                if v is not None and not (isinstance(v, str) and not v.strip())
+            }
+            if cleaned:
+                if self._fields.get(key) != cleaned:
+                    self._fields[key] = cleaned
+                    changed = True
+            elif key in self._fields:
+                del self._fields[key]
+                changed = True
+        if changed:
+            self._dirty = True
+        return changed
 
     def set_period(self, index: int, value: int) -> bool:
         row = self.row(index)
@@ -1033,7 +1680,7 @@ class WaveDocument:
         self._record("period")
         row.period = value
         if self.auto_extend_clocks:
-            self.extend_clocks(record=False)
+            self.fit_clocks(record=False)
         self._dirty = True
         return True
 
@@ -1057,8 +1704,7 @@ class WaveDocument:
     # Clipboard payloads
     # ------------------------------------------------------------------
     def clipboard_payload(self, indices: Iterable[int]) -> str:
-        rows = self.copy_rows(indices)
-        return json.dumps({"signal": rows}, ensure_ascii=False, indent=2)
+        return self.copy_nodes_payload(indices)
 
     # ------------------------------------------------------------------
     # Misc
@@ -1071,8 +1717,30 @@ class WaveDocument:
     def summary(self) -> str:
         return f"{len(self.rows)} signals · {self.column_count} cells"
 
+    def signal_json(self) -> list[Any]:
+        return [node.to_value() for node in self.signal_tree]
 
-def _normalise_clipboard_rows(payload: Any) -> list[dict[str, Any]]:
+
+def _runs(values: Sequence[int]) -> list[tuple[int, int]]:
+    """Group sorted integers into inclusive runs."""
+    runs: list[tuple[int, int]] = []
+    start = None
+    previous = None
+    for value in values:
+        if start is None:
+            start = previous = int(value)
+            continue
+        if int(value) == previous + 1:
+            previous = int(value)
+            continue
+        runs.append((start, previous))
+        start = previous = int(value)
+    if start is not None:
+        runs.append((start, previous))
+    return runs
+
+
+def _normalise_clipboard_nodes(payload: Any) -> list[SignalNode]:
     if isinstance(payload, str):
         text = payload.strip()
         if not text:
@@ -1087,20 +1755,18 @@ def _normalise_clipboard_rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         if "signal" in payload and isinstance(payload["signal"], list):
             payload = payload["signal"]
-        elif "wave" in payload or "name" in payload:
+        elif "wave" in payload or "name" in payload or "node" in payload:
             payload = [payload]
         else:
             return []
     if not isinstance(payload, list):
         return []
-    rows: list[dict[str, Any]] = []
-    for item in payload:
-        if isinstance(item, dict):
-            rows.append(dict(item))
-        elif isinstance(item, list):
-            # Tolerate grouped clipboard payloads.
-            rows.extend(_normalise_clipboard_rows(item))
-    return rows
+    return _parse_signal_nodes(payload)
+
+
+def _normalise_clipboard_rows(payload: Any) -> list[dict[str, Any]]:
+    """Backwards compatible helper returning only flat lanes."""
+    return [row.to_dict() for row in rows_of_nodes(_normalise_clipboard_nodes(payload))]
 
 
 def _format_json_error(exc: json.JSONDecodeError) -> str:
@@ -1135,3 +1801,39 @@ def waveform_summary(row: SignalRow) -> str:
     if row.wave:
         return row.wave
     return ""
+
+
+def clock_fitted(row: Any, target_time_units: float) -> str:
+    """Return ``row.wave`` resized (both directions) to ``target_time_units``."""
+    wave = getattr(row, "wave", "") or ""
+    if not isinstance(wave, str) or not wave:
+        return wave
+    period = max(1, int(round(getattr(row, "period", 1) or 1)))
+    target_chars = max(1, int(math.ceil(target_time_units / period - 1e-9)))
+    if len(wave) < target_chars:
+        return clock_extension(row, target_time_units)
+    if len(wave) == target_chars:
+        return wave
+    return _truncate_wave(wave, target_chars)
+
+
+def _truncate_wave(wave: str, chars: int) -> str:
+    out: list[str] = []
+    visible = 0
+    index = 0
+    while index < len(wave) and visible < chars:
+        char = wave[index]
+        out.append(char)
+        if char not in "<>":
+            visible += 1
+        index += 1
+    text = "".join(out)
+    # Drop dangling sub-cycle markers left by the cut.
+    while text and text[-1] in "<>":
+        text = text[:-1]
+    while text.count("<") > text.count(">"):
+        at = text.rfind("<")
+        if at < 0:
+            break
+        text = text[:at] + text[at + 1 :]
+    return text

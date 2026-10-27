@@ -166,11 +166,14 @@ class SettingsDialog(QDialog):
         self.auto_advance.setChecked(bool(self.settings.get("auto_advance_cell", True)))
         self.live_sync = QCheckBox("Apply valid JSON to the waveform while typing")
         self.live_sync.setChecked(bool(self.settings.get("live_json_sync", True)))
+        self.link_skin = QCheckBox("Use the dark WaveDrom skin when the dark theme is active")
+        self.link_skin.setChecked(bool(self.settings.get("link_wave_skin_to_theme", True)))
         self.show_help = QCheckBox("Show quick help on startup")
         self.show_help.setChecked(bool(self.settings.get("show_shortcut_help_on_start", False)))
         blayout.addWidget(self.auto_clocks)
         blayout.addWidget(self.auto_advance)
         blayout.addWidget(self.live_sync)
+        blayout.addWidget(self.link_skin)
         blayout.addWidget(self.show_help)
         layout.addWidget(behaviour)
 
@@ -345,6 +348,7 @@ class SettingsDialog(QDialog):
         self.auto_clocks.setChecked(True)
         self.auto_advance.setChecked(True)
         self.live_sync.setChecked(True)
+        self.link_skin.setChecked(True)
         self.show_help.setChecked(False)
         self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData("light")))
         self.editor_wrap.setChecked(False)
@@ -361,6 +365,7 @@ class SettingsDialog(QDialog):
             "auto_extend_clocks": self.auto_clocks.isChecked(),
             "auto_advance_cell": self.auto_advance.isChecked(),
             "live_json_sync": self.live_sync.isChecked(),
+            "link_wave_skin_to_theme": self.link_skin.isChecked(),
             "show_shortcut_help_on_start": self.show_help.isChecked(),
             "editor_wrap": self.editor_wrap.isChecked(),
             "editor_font_size": self.font_size.value(),
@@ -394,7 +399,7 @@ class ShortcutHelpDialog(QDialog):
         tabs.addTab(chars, "Wave Characters" if language != "zh" else "波形字符")
         gestures = QTextBrowser()
         gestures.setHtml(_gestures_html(language))
-        tabs.addTab(gestures, "Mouse & Workflow" if language != "zh" else "鼠标与流程")
+        tabs.addTab(gestures, "Mouse && Workflow" if language != "zh" else "鼠标与流程")
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.button(QDialogButtonBox.Close).setText("Close" if language != "zh" else "关闭")
         buttons.rejected.connect(self.reject)
@@ -407,35 +412,52 @@ class RowPropertiesDialog(QDialog):
         super().__init__(parent)
         self.row = row
         self.setWindowTitle("Signal Properties" if language != "zh" else "信号属性")
-        self.resize(560, 360)
+        self.resize(620, 440)
         layout = QVBoxLayout(self)
         form = QFormLayout()
         form.setSpacing(9)
         self.name = QLineEdit(row.name)
         self.wave = QLineEdit(row.wave)
         self.wave.setFont(self.wave.font())
-        self.data = QLineEdit(" ".join(row.data_items()))
+        self.data = QPlainTextEdit("\n".join(row.data_items()))
+        self.data.setPlaceholderText("head\nbody\ntail" if language != "zh" else "head\nbody\ntail")
+        self.data.setFixedHeight(72)
         self.node = QLineEdit(row.node)
+
+        timing = QGroupBox("Timing (rarely used)" if language != "zh" else "时序（不常用）")
+        timing_form = QFormLayout(timing)
         self.period = QSpinBox()
         self.period.setRange(1, 99)
         self.period.setValue(row.period)
+        self.period.setToolTip(
+            "WaveDrom multiplies every wave character by this width"
+            if language != "zh"
+            else "WaveDrom 会将每个波形字符的宽度乘以该值"
+        )
         self.phase = QDoubleSpinBox()
-        self.phase.setRange(0.0, 20.0)
-        self.phase.setSingleStep(0.5)
+        self.phase.setRange(0.0, 99.0)
+        self.phase.setSingleStep(0.25)
         self.phase.setDecimals(2)
         self.phase.setValue(row.phase)
+        self.phase.setToolTip(
+            "Horizontal shift in time slots (0.5 = one half cycle)"
+            if language != "zh"
+            else "以时间槽为单位的水平偏移（0.5 表示半个周期）"
+        )
+        timing_form.addRow("Period", self.period)
+        timing_form.addRow("Phase", self.phase)
+
         form.addRow("Name", self.name)
         form.addRow("Wave", self.wave)
-        form.addRow("Data labels (space separated)", self.data)
+        form.addRow("Data labels (one per line)", self.data)
         form.addRow("Node annotations", self.node)
-        form.addRow("Period", self.period)
-        form.addRow("Phase", self.phase)
         layout.addLayout(form)
+        layout.addWidget(timing)
         note = QLabel(
-            "Wave characters follow WaveDrom: 0 1 x z = p P n N l L h H | . "
+            "Wave characters follow WaveDrom: 0 1 x z = u d p P n N l L h H | . < > "
             "Period multiplies the width of each character; phase is in time slots."
             if language != "zh"
-            else "波形字符遵循 WaveDrom：0 1 x z = p P n N l L h H | . "
+            else "波形字符遵循 WaveDrom：0 1 x z = u d p P n N l L h H | . < > "
             "Period 表示每个字符占用的时间槽数量，Phase 以时间槽为单位。"
         )
         note.setObjectName("Muted")
@@ -450,14 +472,186 @@ class RowPropertiesDialog(QDialog):
         layout.addWidget(buttons)
 
     def values(self) -> dict:
+        labels = [line.strip() for line in self.data.toPlainText().splitlines() if line.strip()]
         return {
             "name": self.name.text(),
             "wave": self.wave.text(),
-            "data": self.data.text().split(),
+            "data": labels,
             "node": self.node.text(),
             "period": self.period.value(),
             "phase": self.phase.value(),
         }
+
+
+class DiagramSettingsDialog(QDialog):
+    """GUI editor for ``config``, ``head`` and ``foot``."""
+
+    def __init__(self, parent, doc, *, language: str = "en"):
+        super().__init__(parent)
+        self.doc = doc
+        self.language = language
+        self.setWindowTitle("Diagram Settings" if language != "zh" else "波形图设置")
+        self.resize(560, 620)
+        layout = QVBoxLayout(self)
+
+        config_box = QGroupBox("Diagram" if language != "zh" else "波形图")
+        config_form = QFormLayout(config_box)
+        self.skin = QComboBox()
+        from .skins import available_skins
+
+        for skin in available_skins():
+            self.skin.addItem(skin, skin)
+        index = self.skin.findData(doc.skin_name())
+        self.skin.setCurrentIndex(max(0, index))
+        self.hscale = QSpinBox()
+        self.hscale.setRange(1, 20)
+        self.hscale.setValue(max(1, int(doc.hscale())))
+        self.hscale.setToolTip("Horizontal scale of the diagram")
+        config_form.addRow("Skin", self.skin)
+        config_form.addRow("Horizontal scale (hscale)", self.hscale)
+        layout.addWidget(config_box)
+
+        head = doc.head
+        foot = doc.foot
+        head_box = QGroupBox("Head (above the diagram)" if language != "zh" else "头部（波形上方）")
+        head_form = QFormLayout(head_box)
+        self.head_text = QLineEdit(_text_value(head.get("text")))
+        self.head_tick = QLineEdit(_tick_text(head.get("tick")))
+        self.head_tock = QLineEdit(_tick_text(head.get("tock")))
+        self.head_tick.setPlaceholderText("0 or 1 2 3")
+        self.head_tock.setPlaceholderText("0.5 or 1 2 3")
+        self.head_every = QSpinBox()
+        self.head_every.setRange(1, 99)
+        self.head_every.setValue(_every_value(head))
+        head_form.addRow("Text", self.head_text)
+        head_form.addRow("Tick labels", self.head_tick)
+        head_form.addRow("Tock labels", self.head_tock)
+        head_form.addRow("Every N cycles", self.head_every)
+        layout.addWidget(head_box)
+
+        foot_box = QGroupBox("Foot (below the diagram)" if language != "zh" else "尾部（波形下方）")
+        foot_form = QFormLayout(foot_box)
+        self.foot_text = QLineEdit(_text_value(foot.get("text")))
+        self.foot_tick = QLineEdit(_tick_text(foot.get("tick")))
+        self.foot_tock = QLineEdit(_tick_text(foot.get("tock")))
+        self.foot_tick.setPlaceholderText("0 or 1 2 3")
+        self.foot_tock.setPlaceholderText("0.5 or 1 2 3")
+        self.foot_every = QSpinBox()
+        self.foot_every.setRange(1, 99)
+        self.foot_every.setValue(_every_value(foot))
+        foot_form.addRow("Text", self.foot_text)
+        foot_form.addRow("Tick labels", self.foot_tick)
+        foot_form.addRow("Tock labels", self.foot_tock)
+        foot_form.addRow("Every N cycles", self.foot_every)
+        layout.addWidget(foot_box)
+
+        note = QLabel(
+            "Tick/tock accept a number, a start value or a list of labels. "
+            "Rich JSONML text (arrays of tspan objects) is preserved when the text field is left unchanged."
+            if language != "zh"
+            else "Tick/tock 可填数字、起始值或标签列表。"
+            "如果文本字段未修改，原有的 JSONML 富文本（tspan 数组）会被保留。"
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch(1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Apply" if language != "zh" else "应用")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消" if language == "zh" else "Cancel")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self) -> dict:
+        head = _section_values(
+            self.head_text,
+            self.head_tick,
+            self.head_tock,
+            self.head_every,
+            self.doc.head,
+        )
+        foot = _section_values(
+            self.foot_text,
+            self.foot_tick,
+            self.foot_tock,
+            self.foot_every,
+            self.doc.foot,
+        )
+        return {
+            "skin": self.skin.currentData(),
+            "hscale": self.hscale.value(),
+            "head": head,
+            "foot": foot,
+        }
+
+
+def _text_value(value) -> str:
+    """Flatten WaveDrom JSONML text into a plain string for a line edit."""
+    return _text_value_raw(value).strip()
+
+
+def _text_value_raw(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "".join(_text_value_raw(item) for item in value[1:])
+    if isinstance(value, dict):
+        return ""
+    return str(value)
+
+
+def _tick_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(item) for item in value)
+    return str(value)
+
+
+def _every_value(section: dict) -> int:
+    try:
+        return max(1, int(section.get("every", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _parse_tick(text: str):
+    text = (text or "").strip()
+    if not text:
+        return None
+    parts = text.replace(",", " ").split()
+    values = []
+    for part in parts:
+        try:
+            number = float(part)
+        except ValueError:
+            return text
+        values.append(int(number) if number.is_integer() else number)
+    if len(values) == 1:
+        return values[0]
+    return values
+
+
+def _section_values(text_edit, tick_edit, tock_edit, every_spin, original: dict) -> dict:
+    values: dict = {}
+    original_text = _text_value(original.get("text"))
+    new_text = text_edit.text().strip()
+    if new_text:
+        if isinstance(original.get("text"), (list, tuple)) and new_text == original_text:
+            values["text"] = original["text"]
+        else:
+            values["text"] = new_text
+    for key, edit in (("tick", tick_edit), ("tock", tock_edit)):
+        parsed = _parse_tick(edit.text())
+        if parsed is not None:
+            values[key] = parsed
+    if ("tick" in values or "tock" in values) and every_spin.value() > 1:
+        values["every"] = every_spin.value()
+    return values
+
 
 
 class RelationDialog(QDialog):
@@ -651,14 +845,25 @@ def _characters_html(language: str) -> str:
     <tr><td><code>h</code> / <code>H</code></td><td>High phase of a clock; <code>H</code> adds a marker</td><td><code>h.......</code></td></tr>
     <tr><td><code>u</code> / <code>d</code></td><td>Bus with an up/down transition</td><td><code>x.ud.x</code></td></tr>
     <tr><td><code>|</code></td><td>Waveform gap marker</td><td><code>p.....|...</code></td></tr>
+    <tr><td><code>&lt;</code> / <code>&gt;</code></td><td>Sub-cycle (sharp) transitions</td><td><code>0&lt;1&gt;0</code></td></tr>
     </table>
     <h3>Editing a range</h3>
     <p>Drag across cells to select a rectangle, then type any wave character. The character is written
-    to every selected cell. Use <b>Copy Cells</b> / <b>Paste Cells</b> to move a block, and
-    <b>Delete</b> to set selected cells to <code>.</code>.</p>
+    to every selected cell. <b>Delete</b> removes the selected cycles (the rest of the lane shifts left),
+    <b>Shift+Delete</b> sets them to <code>.</code>, and <b>Ctrl+Shift+←/→</b> inserts one cycle before/after
+    the selection.</p>
+    <h3>Insert mode</h3>
+    <p>Click the middle mouse button on a waveform cell to toggle insert mode. Every character you type is
+    inserted at the cursor and the rest of the lane is pushed right; press <b>Esc</b> or the middle mouse
+    button again to leave insert mode.</p>
     <h3>Clocks</h3>
-    <p>Signals whose name contains <code>clk</code> or <code>clock</code> are automatically stretched to the
-    longest signal. A clock is extended with <code>.</code>, so <code>p.......</code> stays a clock.</p>
+    <p>Signals whose name contains <code>clk</code> or <code>clock</code> automatically follow the longest
+    signal: they are extended <i>and</i> shortened. A clock is extended with <code>.</code>, so
+    <code>p.......</code> stays a clock; rectangular <code>0</code>/<code>1</code> clocks repeat their pattern.</p>
+    <h3>Empty rows and groups</h3>
+    <p><code>{}</code> inserts an empty spacer row (Signal → Insert Empty Row). Select several signals and use
+    <b>Ctrl+G</b> to wrap them in a named group; nested groups are preserved, and clicking a group bracket
+    selects the whole group. <b>Ctrl+Shift+G</b> ungroups the selected group again.</p>
     """
 
 
@@ -667,21 +872,25 @@ def _gestures_html(language: str) -> str:
     <h2>Mouse & workflow</h2>
     <table cellspacing='0' cellpadding='5' width='100%'>
     <tr><th align='left'>Gesture</th><th align='left'>Action</th></tr>
-    <tr><td>Double-click a name</td><td>Edit the signal name inline. <b>Enter</b> or <b>Tab</b> commits and opens the next name/data field.</td></tr>
-    <tr><td>Double-click a data label</td><td>Edit the bus label. <b>Tab</b> moves to the next editable label.</td></tr>
-    <tr><td>Drag in the left gutter</td><td>Reorder signals. The drop line shows the insertion point.</td></tr>
-    <tr><td>Drag on the waveform</td><td>Select a rectangular block of cells.</td></tr>
+    <tr><td>Double-click a name</td><td>Edit the signal name inline. <b>Enter</b> commits and opens the next signal name.</td></tr>
+    <tr><td>Double-click a data label</td><td>Edit the bus label. <b>Tab</b> commits and opens the next data label.</td></tr>
+    <tr><td>Double-click a group bracket</td><td>Rename the group.</td></tr>
+    <tr><td>Click a group bracket</td><td>Select every signal of the group (Ctrl+click toggles, Shift+click extends).</td></tr>
+    <tr><td>Drag in the left gutter</td><td>Reorder the selected signals; groups keep their nested structure.</td></tr>
+    <tr><td>Drag on the waveform</td><td>Select a rectangular block of cells, including empty cycles to the right.</td></tr>
+    <tr><td>Middle click</td><td>Toggle insert mode at the clicked cell.</td></tr>
     <tr><td>Type on a selection</td><td>Write a WaveDrom character to all selected cells.</td></tr>
-    <tr><td>Click a gutter row</td><td>Select a signal for copy / cut / paste / delete / duplicate.</td></tr>
-    <tr><td>Right-click</td><td>Context menu for labels, signals and cells.</td></tr>
+    <tr><td>Right-click</td><td>Context menu for labels, signals, groups and cells.</td></tr>
     <tr><td>Ctrl + mouse wheel</td><td>Zoom; Shift + wheel scrolls horizontally.</td></tr>
     <tr><td>Split view</td><td>Edit JSON and waveform simultaneously; valid JSON renders live and waveform edits update the JSON.</td></tr>
     </table>
     <h3>Useful defaults</h3>
-    <p><b>Insert</b> inserts a signal above, <b>Ctrl+Insert</b> below, <b>Ctrl+D</b> duplicates,
-    <b>Ctrl+C / X / V</b> copy, cut and paste signals, <b>Alt+↑/↓</b> moves a signal.
+    <p><b>Insert</b> inserts a signal above, <b>Ctrl+Insert</b> below, <b>Ctrl+Return</b> appends a signal and
+    starts editing its name, <b>Ctrl+D</b> duplicates, <b>Ctrl+C / X / V</b> copy, cut and paste signals or whole
+    groups, <b>Alt+↑/↓</b> moves a signal. <b>Delete</b> removes cycles, <b>Ctrl+Shift+←/→</b> inserts cycles.
     Press <b>F2</b> to edit a name or data label and <b>F1</b> for this help.</p>
-    <h3>Live JSON</h3>
-    <p>The editor applies valid JSON after a short debounce. If the JSON is invalid, the waveform keeps the
-    last valid state and the error is shown with its line number. Use Ctrl+Enter to apply immediately.</p>
+    <h3>Tabs and live JSON</h3>
+    <p>Every opened file gets its own tab (<b>Ctrl+Tab</b> / <b>Ctrl+Shift+Tab</b>, <b>Ctrl+W</b> closes) and the
+    clipboard keeps whole groups, so signals can be copied between diagrams. The editor applies valid JSON after
+    a short debounce; if the JSON is invalid the waveform keeps the last valid state and the error line is shown.</p>
     """

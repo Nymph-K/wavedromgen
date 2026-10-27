@@ -2,6 +2,69 @@
 
 All notable changes to WaveDromGen are documented here.
 
+## [2.1.0] — 2026-10-28
+
+This release focuses on WaveDrom compatibility, signal groups, cycle-level
+editing and working on several diagrams at once.
+
+### Added
+
+- Named signal groups, including nested groups: click a group bracket to select
+  the whole group, `Ctrl+G` groups the selection, `Ctrl+Shift+G` ungroups,
+  double-click renames. Groups can be copied, cut, pasted, duplicated, moved and
+  deleted as a unit, and grouping a group with plain signals builds a larger
+  nested group.
+- Empty `{}` spacer lanes are preserved on load/save and can be inserted from
+  **Signal → Insert Empty Row {}**.
+- `data` labels edited in the GUI are written as WaveJSON arrays
+  (`"data": ["head", "body", "tail"]`).
+- **Diagram Settings** dialog for the common `config`/`head`/`foot` options:
+  skin, `hscale`, head/foot text, `tick`, `tock` and `every`.
+- Quick `period` / `phase` editing from the right-click menu, in addition to the
+  signal properties dialog.
+- Insert-mode editing: press the middle mouse button on a cell to insert typed
+  characters and push the rest of the lane right; leave with `Esc` or another
+  middle click. **Ctrl+Shift+←/→** inserts one cycle before/after the selection
+  for every selected lane.
+- **Delete** now really deletes the selected cycles (the lane shifts left);
+  **Shift+Delete** keeps the old "replace with `.`" behaviour.
+- Multiple document tabs with per-tab editor text, selection, zoom and scroll
+  position; whole signals or groups can be copied between tabs and windows.
+- Waveform cycles to the right of the last character can be selected, dragged
+  over continuously and edited.
+- The JSON editor follows the waveform selection: it scrolls to the lane's
+  `wave` line and highlights the selected cycle characters.
+- Dark mode can switch the waveform to the official `dark` skin automatically
+  (**Preferences → Behaviour**, enabled by default).
+- Export dialogs default to the current file name and remember the last export
+  folder.
+- New `groups.json` and `arrows.json` examples.
+
+### Changed
+
+- Clock lanes follow the longest signal in both directions: they shrink when the
+  longest signal gets shorter, not only grow.
+- In inline label editing, `Enter` jumps to the next signal name and `Tab` to
+  the next data label (wrapping around); the two kinds can still be reached from
+  each other.
+- New signals use the clock length, and `Ctrl+Enter` opens the name editor for
+  the new lane.
+- Drag handles in the signal gutter stay left-aligned for long signal names.
+- Signal group brackets and rotated group names are rendered on screen and in
+  PNG/SVG exports.
+- JSON synchronisation and **Format JSON** now round-trip groups, empty rows,
+  `edge` arrows/sharp lines, JSONML `head`/`foot` text and unknown fields
+  instead of flattening or dropping them.
+- WaveDrom JSONML `head`/`foot` text keeps inner spaces when flattened.
+
+### Fixed
+
+- Selecting signals beyond the end of a short `wave` string is possible, and
+  painting there extends the lane instead of being ignored.
+- Deleting the longest signal shortens the clocks again.
+- Long signal names no longer push the drag handle out of alignment.
+- Group names and brackets are exported with the diagram.
+
 ## [2.0.0] — 2026-10-26
 
 A complete rewrite of the desktop UI on Qt/PySide6 with a WaveDrom-compatible

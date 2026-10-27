@@ -410,6 +410,29 @@ def build_stylesheet(theme: Theme) -> str:
         background: {t.surface.name()};
         top: -1px;
     }}
+    QTabBar#DocumentTabs {{
+        background: {t.surface.name()};
+        border-bottom: 1px solid {t.border.name()};
+        qproperty-drawBase: 0;
+    }}
+    QTabBar#DocumentTabs::tab {{
+        padding: 5px 12px;
+        margin: 3px 2px 0 2px;
+        border: 1px solid transparent;
+        border-top-left-radius: 6px;
+        border-top-right-radius: 6px;
+        color: {t.muted.name()};
+        font-size: 9pt;
+    }}
+    QTabBar#DocumentTabs::tab:selected {{
+        background: {t.background.name()};
+        border-color: {t.border.name()};
+        border-bottom-color: {t.background.name()};
+        color: {t.text.name()};
+    }}
+    QTabBar#DocumentTabs::tab:hover {{
+        color: {t.text.name()};
+    }}
     QTabBar::tab {{
         background: transparent;
         padding: 6px 14px;

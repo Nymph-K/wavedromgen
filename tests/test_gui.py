@@ -61,6 +61,10 @@ class GuiTestBase(unittest.TestCase):
 
     def tearDown(self):
         try:
+            for tab in getattr(self.win, "tabs", []):
+                tab.doc.mark_saved()
+            # Never block the test run on a modal "save changes?" dialog.
+            self.win._maybe_save = lambda *args, **kwargs: True
             self.win.doc.mark_saved()
             self.win.editor_panel.set_text(self.win._json_text())
             self.win.editor_panel.mark_synced()
@@ -189,12 +193,34 @@ class CanvasEditingTests(GuiTestBase):
         self.assertEqual(self.win.doc.rows[1].wave[0], "1")
         self.assertEqual(self.canvas.active_cell, (1, 1))
 
-    def test_clear_cell_with_delete(self):
+    def test_delete_removes_cycle(self):
+        from WaveDromGen.model import Selection
+
+        self.win._apply_editor_text(
+            json.dumps(
+                {
+                    "signal": [
+                        {"name": "clk", "wave": "p....."},
+                        {"name": "a", "wave": "0123.."},
+                    ]
+                }
+            )
+        )
+        QTest.qWait(100)
         self._focus_canvas()
-        self.canvas._set_active(1, 0)
+        self.canvas.selection = Selection(1, 1, 1, 2)
+        self.canvas.active_cell = (1, 1)
         QTest.keyClick(self.canvas, Qt.Key_Delete)
-        QTest.qWait(40)
-        self.assertEqual(self.win.doc.rows[1].wave[0], ".")
+        QTest.qWait(60)
+        # Delete removes the selected cycles instead of replacing them with "."
+        self.assertEqual(self.win.doc.rows[1].wave, "03..")
+        self.assertEqual(len(self.win.doc.rows[0].wave), 4)
+        # Shift+Delete is still the "clear to ." command
+        self.canvas.selection = Selection(1, 0, 1, 0)
+        self.canvas.active_cell = (1, 0)
+        QTest.keyClick(self.canvas, Qt.Key_Delete, Qt.ShiftModifier)
+        QTest.qWait(60)
+        self.assertTrue(self.win.doc.rows[1].wave.startswith("."))
 
     def test_clock_extension_after_columns(self):
         before = len(self.win.doc.rows[0].wave)
@@ -244,8 +270,12 @@ class RowOperationTests(GuiTestBase):
         count = len(self.win.doc.rows)
         self._focus_canvas()
         QTest.keyClick(self.canvas, Qt.Key_Return, Qt.ControlModifier)
-        QTest.qWait(60)
+        QTest.qWait(80)
         self.assertEqual(len(self.win.doc.rows), count + 1)
+        # Ctrl+Return also starts editing the new signal name.
+        self.assertTrue(self.canvas._editing)
+        QTest.keyClick(self.canvas._editor, Qt.Key_Escape)
+        QTest.qWait(40)
         QTest.keyClick(self.canvas, Qt.Key_Z, Qt.ControlModifier)
         QTest.qWait(60)
         self.assertEqual(len(self.win.doc.rows), count)
@@ -401,6 +431,288 @@ class ExportTests(GuiTestBase):
         painter.end()
         self.assertIn("<svg", svg_path.read_text(encoding="utf-8"))
 
+
+
+class WaveCompatibilityTests(GuiTestBase):
+    GROUP_DOC = {
+        "signal": [
+            {"name": "clk", "wave": "p..Pp..P"},
+            [
+                "Master",
+                ["ctrl", {"name": "write", "wave": "01.0...."}, {"name": "read", "wave": "0...1..0"}],
+                {"name": "addr", "wave": "x3.x4..x", "data": ["A1", "A2"]},
+                {"name": "wdata", "wave": "x3.x....", "data": ["D1"]},
+            ],
+            {},
+            ["Slave", ["ctrl", {"name": "ack", "wave": "x01x0.1x"}], {"name": "rdata", "wave": "x.....4x"}],
+        ],
+        "edge": ["b-|a t1"],
+        "head": {"text": "Title"},
+        "config": {"hscale": 1, "skin": "default"},
+        "extra": {"keep": True},
+    }
+
+    def _load(self, source):
+        self.win._apply_editor_text(json.dumps(source))
+        self.win.editor_panel.set_text(self.win._json_text())
+        self.win.editor_panel.mark_synced()
+        self.canvas.refresh()
+        QTest.qWait(60)
+
+    def test_group_click_selects_group_and_ungroup(self):
+        self._load(self.GROUP_DOC)
+        QTest.qWait(80)
+        group = next(item for item in self.canvas._layout.groups if item.name == "Master")
+        QTest.mouseClick(
+            self.canvas,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            QPoint(int(group.x - 2), int((group.top + group.bottom) / 2)),
+        )
+        QTest.qWait(40)
+        self.assertEqual(self.canvas.selected_rows(), list(range(group.span.start, group.span.end + 1)))
+        self.assertIsNotNone(self.canvas.selected_group_span())
+        self.win._ungroup_selection()
+        QTest.qWait(80)
+        tree = self.win.doc.dump_dict()["signal"]
+        # "Master" is dissolved; its nested "ctrl" group stays intact.
+        self.assertEqual(tree[1][0], "ctrl")
+        self.assertEqual(tree[2]["name"], "addr")
+        self.assertEqual(tree[3]["name"], "wdata")
+
+    def test_group_copy_paste_keeps_structure(self):
+        self._load(self.GROUP_DOC)
+        QTest.qWait(60)
+        self.win._select_rows([1, 2, 3, 4])
+        self.win._copy_rows()
+        self.win._select_rows([7])
+        self.win._paste_rows()
+        QTest.qWait(80)
+        tree = self.win.doc.dump_dict()["signal"]
+        self.assertEqual(tree[-1][0], "Master")
+        self.assertEqual(tree[-1][1][0], "ctrl")
+
+    def test_empty_row_and_unknown_fields_survive_format(self):
+        source = {
+            "signal": [
+                {"name": "a", "wave": "01..", "node": ".x..", "custom": {"k": 1}},
+                {},
+                ["G", {"name": "b", "wave": "10.."}],
+            ],
+            "edge": ["a-|b setup"],
+            "head": {"text": ["tspan", ["tspan", {"class": "h1"}, "big"], " tail"], "tick": 0},
+            "config": {"hscale": 2, "skin": "lowkey", "marks": False},
+            "extra": {"keep": True},
+        }
+        self._load(source)
+        QTest.qWait(60)
+        self.win._format_json()
+        QTest.qWait(120)
+        self.assertFalse(self.win.editor_panel.has_error)
+        formatted = json.loads(self.win.editor_panel.text())
+        self.assertEqual(formatted["signal"][1], {})
+        self.assertEqual(formatted["signal"][2][0], "G")
+        self.assertEqual(formatted["edge"], ["a-|b setup"])
+        self.assertEqual(formatted["head"]["text"][1][1], {"class": "h1"})
+        self.assertEqual(formatted["config"]["marks"], False)
+        self.assertEqual(formatted["extra"], {"keep": True})
+        self.assertEqual(formatted["signal"][0]["custom"], {"k": 1})
+
+    def test_data_labels_written_as_arrays(self):
+        self._load({"signal": [{"name": "bus", "wave": "x.==x", "data": "A B"}]})
+        QTest.qWait(60)
+        self.win.doc.set_data_label(0, 0, "HEAD")
+        self.win._sync_editor_from_doc(force=True)
+        QTest.qWait(40)
+        self.assertIn('"HEAD"', self.win.editor_panel.text())
+        self.assertIn("[", self.win.editor_panel.text())
+        self.assertEqual(self.win.doc.rows[0].data_value, ["HEAD", "B"])
+
+
+class CycleEditingTests(GuiTestBase):
+    def _load(self, source):
+        self.win._apply_editor_text(json.dumps(source))
+        self.win.editor_panel.set_text(self.win._json_text())
+        self.win.editor_panel.mark_synced()
+        self.canvas.refresh()
+        QTest.qWait(60)
+
+    def test_insert_cycle_before_and_after(self):
+        from WaveDromGen.model import Selection
+
+        self._load({"signal": [{"name": "a", "wave": "0123"}, {"name": "b", "wave": "0101"}]})
+        self.canvas.selection = Selection(0, 1, 1, 1)
+        self.canvas.active_cell = (0, 1)
+        self._focus_canvas()
+        self.win._insert_cycle(True)
+        QTest.qWait(60)
+        self.assertEqual(self.win.doc.rows[0].wave, "0.123")
+        self.assertEqual(self.win.doc.rows[1].wave, "0.101")
+        self.win._insert_cycle(False)
+        QTest.qWait(60)
+        self.assertEqual(self.win.doc.rows[0].wave, "0..123")
+
+    def test_middle_click_toggles_insert_mode(self):
+        self._load({"signal": [{"name": "a", "wave": "0123"}]})
+        QTest.qWait(40)
+        row = self.canvas._layout.rows[0]
+        QTest.mouseClick(
+            self.canvas,
+            Qt.MiddleButton,
+            Qt.NoModifier,
+            QPoint(int(row.char_x(2) + 4), int(row.slot_top + 12)),
+        )
+        QTest.qWait(50)
+        self.assertTrue(self.canvas.insert_mode)
+        QTest.keyClick(self.canvas, Qt.Key_X)
+        QTest.qWait(50)
+        self.assertEqual(self.win.doc.rows[0].wave, "01x23")
+        QTest.keyClick(self.canvas, Qt.Key_Escape)
+        QTest.qWait(30)
+        self.assertFalse(self.canvas.insert_mode)
+
+    def test_right_side_empty_cycle_editing(self):
+        self._load({"signal": [{"name": "a", "wave": "01.."}, {"name": "clk", "wave": "p..."}]})
+        QTest.qWait(40)
+        row = self.canvas._layout.rows[0]
+        QTest.mouseClick(
+            self.canvas,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            QPoint(int(row.char_x(6) + 4), int(row.slot_top + 12)),
+        )
+        QTest.qWait(60)
+        self.assertEqual(self.canvas.active_cell, (0, 6))
+        self._focus_canvas()
+        QTest.keyClick(self.canvas, Qt.Key_1)
+        QTest.qWait(70)
+        self.assertEqual(len(self.win.doc.rows[0].wave), 7)
+        self.assertEqual(self.win.doc.rows[0].wave[6], "1")
+
+    def test_enter_walks_names_and_tab_walks_data_labels(self):
+        self._load(
+            {
+                "signal": [
+                    {"name": "clk", "wave": "p......."},
+                    {"name": "bus", "wave": "x.==x...", "data": ["OLD", "NEXT"]},
+                    {"name": "sig", "wave": "01......"},
+                ]
+            }
+        )
+        QTest.qWait(60)
+        self.canvas.edit_name_at(1)
+        QTest.qWait(40)
+        QTest.keyClick(self.canvas._editor, Qt.Key_Return)
+        QTest.qWait(80)
+        self.assertEqual(self.canvas._editing_target.kind, "name")
+        self.assertEqual(self.canvas._editing_target.row, 2)
+        QTest.keyClick(self.canvas._editor, Qt.Key_Escape)
+        QTest.qWait(40)
+        self.canvas.edit_name_at(1)
+        QTest.qWait(40)
+        QTest.keyClick(self.canvas._editor, Qt.Key_Tab)
+        QTest.qWait(80)
+        self.assertEqual(self.canvas._editing_target.kind, "data")
+        self.assertEqual(self.canvas._editing_target.data_index, 0)
+        QTest.keyClick(self.canvas._editor, Qt.Key_Tab)
+        QTest.qWait(80)
+        self.assertEqual(self.canvas._editing_target.data_index, 1)
+        QTest.keyClick(self.canvas._editor, Qt.Key_Return)
+        QTest.qWait(80)
+        self.assertEqual(self.canvas._editing_target.kind, "name")
+        QTest.keyClick(self.canvas._editor, Qt.Key_Escape)
+        QTest.qWait(30)
+
+    def test_ctrl_enter_opens_name_editor(self):
+        self._focus_canvas()
+        QTest.keyClick(self.canvas, Qt.Key_Return, Qt.ControlModifier)
+        QTest.qWait(100)
+        self.assertTrue(self.canvas._editing)
+        self.assertEqual(self.canvas._editing_target.kind, "name")
+        self.canvas._editor.setText("payload")
+        QTest.keyClick(self.canvas._editor, Qt.Key_Return)
+        QTest.qWait(80)
+        self.assertEqual(self.win.doc.rows[-1].name, "payload")
+
+    def test_editor_follows_waveform_selection(self):
+        from WaveDromGen.model import Selection
+
+        self._load(
+            {
+                "signal": [
+                    {"name": "clk", "wave": "p......."},
+                    {"name": "bus", "wave": "x.==x...", "data": ["A", "B"]},
+                ]
+            }
+        )
+        QTest.qWait(60)
+        self._focus_canvas()
+        self.canvas.selection = Selection(1, 3, 1, 4)
+        self.canvas.active_cell = (1, 3)
+        self.canvas._emit_cursor_info()
+        QTest.qWait(60)
+        editor = self.win.editor_panel.editor
+        ranges = editor.wave_value_ranges()
+        self.assertEqual(len(ranges), 2)
+        selection = editor._wave_selection
+        self.assertIsNotNone(selection)
+        text = editor.toPlainText()
+        start = selection.cursor.selectionStart() - ranges[1][0]
+        end = selection.cursor.selectionEnd() - ranges[1][0]
+        self.assertEqual((start, end), (3, 5))
+        self.assertEqual(text[selection.cursor.selectionStart(): selection.cursor.selectionEnd()], "=x")
+
+
+class ThemeAndTabTests(GuiTestBase):
+    def test_dark_theme_switches_wave_skin(self):
+        self.assertNotEqual(self.win.doc.skin_name(), "dark")
+        self.win._toggle_theme()
+        QTest.qWait(100)
+        self.assertTrue(self.win.theme.dark)
+        self.assertEqual(self.win.doc.skin_name(), "dark")
+        self.win._toggle_theme()
+        QTest.qWait(100)
+        self.assertFalse(self.win.theme.dark)
+        self.assertEqual(self.win.doc.skin_name(), "default")
+
+    def test_tabs_keep_documents_and_cross_paste(self):
+        self.win._apply_editor_text(
+            json.dumps({"signal": [{"name": "clk", "wave": "p..."}, {"name": "bus", "wave": "x.==x"}]})
+        )
+        # Keep the editor text and the model in sync (programmatic apply).
+        self.win.editor_panel.set_text(self.win._json_text())
+        self.win.editor_panel.mark_synced()
+        QTest.qWait(100)
+        other = Path(self.tmp.name) / "second.json"
+        other.write_text(
+            json.dumps({"signal": [{"name": "x", "wave": "01.."}, {"name": "y", "wave": "10.."}]}),
+            encoding="utf-8",
+        )
+        self.win.open_file(str(other))
+        QTest.qWait(150)
+        self.assertEqual(len(self.win.tabs), 2)
+        self.assertTrue(self.win.tab_bar.isVisible())
+        self.assertEqual([row.name for row in self.win.doc.rows], ["x", "y"])
+        # Copy two lanes in the first tab...
+        self.win._activate_tab(0)
+        QTest.qWait(80)
+        self.win._select_rows([0, 1])
+        self.win._copy_rows()
+        # ...and paste them into the second one.
+        self.win._activate_tab(1)
+        QTest.qWait(80)
+        self.win._select_rows([0])
+        self.win._paste_rows()
+        QTest.qWait(100)
+        self.assertEqual([row.name for row in self.win.doc.rows], ["x", "clk", "bus", "y"])
+        # Closing a tab keeps the other document alive.
+        for tab in self.win.tabs:
+            tab.doc.mark_saved()
+        self.win.editor_panel.set_text(self.win._json_text())
+        self.win.editor_panel.mark_synced()
+        self.win._close_tab(1)
+        QTest.qWait(100)
+        self.assertEqual(len(self.win.tabs), 1)
 
 
 if __name__ == "__main__":

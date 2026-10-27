@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QPoint, QRectF, QSize, Qt, QTimer, QUrl
@@ -24,14 +25,17 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
     QSizePolicy,
     QSplitter,
+    QTabBar,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -40,6 +44,7 @@ from .ascii_render import document_to_ascii
 from .dialogs import (
     AboutDialog,
     AsciiDialog,
+    DiagramSettingsDialog,
     RelationDialog,
     RowPropertiesDialog,
     SettingsDialog,
@@ -48,7 +53,7 @@ from .dialogs import (
 from .editor import JsonPanel
 from .icons import has_icon, make_icon
 from .layout import DiagramLayout
-from .model import DocumentError, WaveDocument
+from .model import DocumentError, Selection, WaveDocument
 from .renderer import CanvasColors, PaintState, WaveRenderer, pixmap_for_document
 from .settings import Settings
 from .shortcuts import (
@@ -65,6 +70,20 @@ ASSET_DIR = Path(__file__).resolve().parent.parent / "asset"
 APP_ICON = Path(__file__).resolve().parent / "resources" / "app.ico"
 if not APP_ICON.exists():
     APP_ICON = ASSET_DIR / "app.ico"
+
+
+@dataclass
+class DocTab:
+    """One open diagram tab (the document plus its per-tab editor state)."""
+
+    doc: WaveDocument
+    editor_text: str = ""
+    selection: Selection | None = None
+    active_cell: tuple[int, int] | None = None
+    selected_rows: list[int] = field(default_factory=list)
+    zoom: float = 1.0
+    scroll: tuple[int, int] = (0, 0)
+    title: str = ""
 
 
 def ensure_fonts() -> None:
@@ -95,6 +114,9 @@ class MainWindow(QMainWindow):
         self.doc = WaveDocument(
             auto_extend_clocks=bool(settings.get("auto_extend_clocks", True))
         )
+        self.tabs: list[DocTab] = []
+        self._active_tab = -1
+        self._switching_tab = False
         self.actions: dict[str, QAction] = {}
         self.local_actions: dict[str, QAction] = {}
         self._inline_editing = False
@@ -122,13 +144,14 @@ class MainWindow(QMainWindow):
         self._apply_icons()
         self._connect_signals()
         self._apply_theme(self.theme_name, initial=True)
-        self._set_document(self.doc, reset_view=True)
+        self._new_tab(self.doc, reset_view=True)
         self._restore_window_state()
         self._set_view_mode(settings.get("view_mode", "stacked"), initial=True)
         self.canvas.set_auto_advance(bool(settings.get("auto_advance_cell", True)))
         self.editor_panel.set_live(bool(settings.get("live_json_sync", True)))
         self.editor_panel.set_text(self._json_text(), reset_undo=True)
         self.editor_panel.mark_synced()
+        self._capture_tab_state()
         self._sync_config_actions()
         self._update_actions()
         self._update_status()
@@ -163,7 +186,11 @@ class MainWindow(QMainWindow):
         checkable_views = ["view_wave", "view_editor", "view_stacked", "view_side"]
         for action_id, definition in self.registry.actions.items():
             action = QAction(self)
-            action.setCheckable(action_id in checkable_tools or action_id in checkable_views or action_id == "toggle_live")
+            action.setCheckable(
+                action_id in checkable_tools
+                or action_id in checkable_views
+                or action_id in ("toggle_live", "toggle_insert_mode")
+            )
             action.setShortcutContext(Qt.ApplicationShortcut)
             action.triggered.connect(lambda checked=False, aid=action_id: self._dispatch(aid, checked))
             self.actions[action_id] = action
@@ -326,7 +353,25 @@ class MainWindow(QMainWindow):
                 widget.setObjectName("ToolRailButton")
         central_layout.addWidget(self.tool_rail)
         central_layout.addWidget(self.splitter, 1)
-        self.setCentralWidget(central)
+
+        outer = QWidget()
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        self.tab_bar = QTabBar()
+        self.tab_bar.setObjectName("DocumentTabs")
+        self.tab_bar.setExpanding(False)
+        self.tab_bar.setMovable(True)
+        self.tab_bar.setTabsClosable(True)
+        self.tab_bar.setDrawBase(False)
+        self.tab_bar.setUsesScrollButtons(True)
+        self.tab_bar.setElideMode(Qt.ElideRight)
+        self.tab_bar.currentChanged.connect(self._on_tab_changed)
+        self.tab_bar.tabCloseRequested.connect(self._close_tab)
+        self.tab_bar.setVisible(False)
+        outer_layout.addWidget(self.tab_bar)
+        outer_layout.addWidget(central, 1)
+        self.setCentralWidget(outer)
 
         self.main_toolbar = QToolBar("Main")
         self.main_toolbar.setObjectName("MainToolBar")
@@ -396,6 +441,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         add(file_menu, "save")
         add(file_menu, "save_as")
+        add(file_menu, "close_tab")
         file_menu.addSeparator()
         add(file_menu, "export_png")
         add(file_menu, "export_svg")
@@ -416,6 +462,12 @@ class MainWindow(QMainWindow):
         add(edit_menu, "row_insert_above")
         add(edit_menu, "row_insert_below")
         add(edit_menu, "row_add")
+        add(edit_menu, "row_insert_spacer")
+        edit_menu.addSeparator()
+        add(edit_menu, "delete_cells")
+        add(edit_menu, "insert_cycle_before")
+        add(edit_menu, "insert_cycle_after")
+        add(edit_menu, "toggle_insert_mode")
         edit_menu.addSeparator()
         add(edit_menu, "cell_copy")
         add(edit_menu, "cell_paste")
@@ -431,6 +483,10 @@ class MainWindow(QMainWindow):
         add(signal_menu, "row_insert_above")
         add(signal_menu, "row_insert_below")
         signal_menu.addSeparator()
+        add(signal_menu, "group_selection")
+        add(signal_menu, "ungroup_selection")
+        add(signal_menu, "rename_group")
+        signal_menu.addSeparator()
         add(signal_menu, "add_column")
         add(signal_menu, "delete_column")
         signal_menu.addSeparator()
@@ -445,6 +501,9 @@ class MainWindow(QMainWindow):
         add(view_menu, "view_editor")
         add(view_menu, "view_stacked")
         add(view_menu, "view_side")
+        view_menu.addSeparator()
+        add(view_menu, "next_tab")
+        add(view_menu, "prev_tab")
         view_menu.addSeparator()
         add(view_menu, "zoom_in")
         add(view_menu, "zoom_out")
@@ -482,6 +541,7 @@ class MainWindow(QMainWindow):
         add(tools_menu, "copy_ascii")
         add(tools_menu, "toggle_live")
         tools_menu.addSeparator()
+        add(tools_menu, "diagram_config")
         add(tools_menu, "settings")
         add(tools_menu, "show_shortcuts")
         language_menu = QMenu(self._tr("Language", "语言"), self)
@@ -531,6 +591,9 @@ class MainWindow(QMainWindow):
         self.canvas.editStateChanged.connect(self._on_canvas_edit_state)
         self.canvas.toolChanged.connect(self._on_tool_changed)
         self.canvas.zoomChanged.connect(self._on_zoom_changed)
+        self.canvas.insertModeChanged.connect(self._on_insert_mode_changed)
+        self.canvas.waveFocusChanged.connect(self._on_wave_focus)
+        self.canvas.groupRenameRequested.connect(self._rename_group_at)
         self.editor_panel.contentChanged.connect(self._on_editor_content)
         self.editor_panel.applyRequested.connect(self._on_editor_apply)
         self.editor_panel.editor.textChanged.connect(self._on_editor_text_changed)
@@ -547,24 +610,199 @@ class MainWindow(QMainWindow):
             indent = int(self.settings.get("json_indent", 2))
         return self.doc.to_json_text(indent=indent)
 
-    def _set_document(self, doc: WaveDocument, *, reset_view: bool = False) -> None:
+    def _set_document(
+        self, doc: WaveDocument, *, reset_view: bool = False, editor_text: str | None = None
+    ) -> None:
         self.doc = doc
         self.doc.auto_extend_clocks = bool(self.settings.get("auto_extend_clocks", True))
         self.wave_view.set_document(doc, reset_view=reset_view)
         self.canvas = self.wave_view.canvas
         self._apply_canvas_theme()
-        self.editor_panel.set_text(self._json_text(), reset_undo=True)
-        self.editor_panel.mark_synced()
+        restored = editor_text if editor_text else self._json_text()
+        self.editor_panel.set_text(restored, reset_undo=True)
+        if editor_text and editor_text.strip() != self._json_text().strip():
+            # Restore unapplied (possibly invalid) editor content of the tab.
+            self._apply_editor_text(editor_text)
+        else:
+            self.editor_panel.mark_synced()
         self._sync_config_actions()
         self._update_title()
         self._update_actions()
         self._update_status()
 
-    def new_document(self) -> None:
+    # ------------------------------------------------------------------
+    # Document tabs
+    # ------------------------------------------------------------------
+    def _current_tab(self) -> DocTab | None:
+        if 0 <= self._active_tab < len(self.tabs):
+            return self.tabs[self._active_tab]
+        return None
+
+    def _capture_tab_state(self) -> None:
+        tab = self._current_tab()
+        if tab is None:
+            return
+        tab.doc = self.doc
+        if hasattr(self, "editor_panel"):
+            tab.editor_text = self.editor_panel.text()
+        if hasattr(self, "canvas"):
+            tab.selection = self.canvas.selection
+            tab.active_cell = self.canvas.active_cell
+            tab.selected_rows = self.canvas.row_selection_rows
+            tab.zoom = self.canvas.zoom
+        if hasattr(self, "wave_view"):
+            tab.scroll = (
+                self.wave_view.horizontalScrollBar().value(),
+                self.wave_view.verticalScrollBar().value(),
+            )
+
+    def _tab_title(self, tab: DocTab) -> str:
+        name = Path(tab.doc.path).name if tab.doc.path else self._tr("Untitled", "未命名")
+        dirty = tab.doc.dirty
+        if not dirty:
+            if tab is self._current_tab() and hasattr(self, "editor_panel"):
+                text = self.editor_panel.text().strip()
+            else:
+                text = (tab.editor_text or "").strip()
+            if text:
+                try:
+                    dirty = text != tab.doc.to_json_text().strip()
+                except Exception:
+                    dirty = False
+        return f"{name} •" if dirty else name
+
+    def _refresh_tab_titles(self) -> None:
+        if not hasattr(self, "tab_bar"):
+            return
+        for index, tab in enumerate(self.tabs):
+            if index < self.tab_bar.count():
+                title = self._tab_title(tab)
+                if self.tab_bar.tabText(index) != title:
+                    self.tab_bar.setTabText(index, title)
+                path = tab.doc.path or self._tr("Unsaved diagram", "未保存的波形图")
+                self.tab_bar.setTabToolTip(index, path)
+        self.tab_bar.setVisible(len(self.tabs) > 1)
+
+    def _new_tab(
+        self,
+        doc: WaveDocument | None = None,
+        *,
+        reset_view: bool = True,
+        editor_text: str | None = None,
+    ) -> DocTab:
+        doc = doc or WaveDocument(
+            auto_extend_clocks=bool(self.settings.get("auto_extend_clocks", True))
+        )
+        tab = DocTab(doc=doc, editor_text=editor_text or "", zoom=self.canvas.zoom if hasattr(self, "canvas") else 1.0)
+        self._capture_tab_state()
+        self.tabs.append(tab)
+        self.tab_bar.blockSignals(True)
+        self.tab_bar.addTab("")
+        self.tab_bar.blockSignals(False)
+        self._active_tab = len(self.tabs) - 1
+        self._activate_tab(self._active_tab, reset_view=reset_view, editor_text=editor_text)
+        return tab
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self._switching_tab or index < 0:
+            return
+        self._activate_tab(index)
+
+    def _activate_tab(
+        self, index: int, *, reset_view: bool = False, editor_text: str | None = None
+    ) -> None:
+        if index < 0 or index >= len(self.tabs):
+            return
+        if (
+            self._active_tab == index
+            and self.tabs[index].doc is self.doc
+            and hasattr(self, "wave_view")
+            and self.wave_view.canvas.doc is self.doc
+            and editor_text is None
+            and not reset_view
+        ):
+            return
+        self._switching_tab = True
+        try:
+            previous = self._current_tab()
+            if previous is not None and index != self._active_tab:
+                self._capture_tab_state()
+            self._active_tab = index
+            tab = self.tabs[index]
+            self.doc = tab.doc
+            text = editor_text if editor_text is not None else (tab.editor_text or None)
+            self._set_document(tab.doc, reset_view=reset_view, editor_text=text)
+            self._apply_tab_state(tab)
+            self.tab_bar.blockSignals(True)
+            self.tab_bar.setCurrentIndex(index)
+            self.tab_bar.blockSignals(False)
+            self._refresh_tab_titles()
+            self._update_actions()
+            self._update_status()
+            self._update_title()
+        finally:
+            self._switching_tab = False
+
+    def _apply_tab_state(self, tab: DocTab) -> None:
+        canvas = self.canvas
+        canvas.zoom = max(0.45, min(3.0, float(tab.zoom or 1.0)))
+        canvas.selection = tab.selection
+        canvas.active_cell = (
+            tab.active_cell if tab.active_cell is not None else ((0, 0) if tab.doc.rows else None)
+        )
+        canvas._selected_rows = [
+            index for index in tab.selected_rows if 0 <= index < len(tab.doc.rows)
+        ]
+        if canvas.active_cell is not None:
+            canvas._anchor = canvas.active_cell
+        else:
+            canvas._anchor = None
+        canvas.refresh()
+        h, v = tab.scroll
+        self.wave_view.horizontalScrollBar().setValue(max(0, h))
+        self.wave_view.verticalScrollBar().setValue(max(0, v))
+
+    def _close_tab(self, index: int) -> None:
+        if not (0 <= index < len(self.tabs)):
+            return
+        if index != self._active_tab:
+            self._activate_tab(index)
+        self.canvas.commit_editing()
         if not self._maybe_save():
             return
-        self.doc = WaveDocument(auto_extend_clocks=bool(self.settings.get("auto_extend_clocks", True)))
-        self._set_document(self.doc, reset_view=True)
+        self.tabs.pop(index)
+        self.tab_bar.blockSignals(True)
+        self.tab_bar.removeTab(index)
+        self.tab_bar.blockSignals(False)
+        self._active_tab = -1
+        if not self.tabs:
+            self._new_tab()
+            return
+        new_index = min(index, len(self.tabs) - 1)
+        self.tab_bar.blockSignals(True)
+        self.tab_bar.setCurrentIndex(new_index)
+        self.tab_bar.blockSignals(False)
+        self._activate_tab(new_index)
+
+    def new_tab(self) -> None:
+        self._new_tab()
+
+    def next_tab(self) -> None:
+        if len(self.tabs) < 2:
+            return
+        self._activate_tab((self._active_tab + 1) % len(self.tabs))
+
+    def previous_tab(self) -> None:
+        if len(self.tabs) < 2:
+            return
+        self._activate_tab((self._active_tab - 1) % len(self.tabs))
+
+    def close_current_tab(self) -> None:
+        self._close_tab(self._active_tab)
+
+    def new_document(self) -> None:
+        doc = WaveDocument(auto_extend_clocks=bool(self.settings.get("auto_extend_clocks", True)))
+        self._new_tab(doc, reset_view=True)
         self._show_status(self._tr("New diagram created", "已新建波形图"))
         self.canvas.setFocus(Qt.OtherFocusReason)
 
@@ -579,8 +817,26 @@ class MainWindow(QMainWindow):
         if path:
             self.open_file(path)
 
+    def _find_open_tab(self, path: str) -> int | None:
+        try:
+            target = Path(path).resolve()
+        except OSError:
+            target = Path(path)
+        for index, tab in enumerate(self.tabs):
+            if not tab.doc.path:
+                continue
+            try:
+                if Path(tab.doc.path).resolve() == target:
+                    return index
+            except OSError:
+                continue
+        return None
+
     def open_file(self, path: str) -> None:
-        if not self._maybe_save():
+        existing = self._find_open_tab(path)
+        if existing is not None:
+            self._activate_tab(existing)
+            self._show_status(self._tr(f"Switched to {Path(path).name}", f"已切换到 {Path(path).name}"))
             return
         try:
             text = Path(path).read_text(encoding="utf-8-sig")
@@ -600,15 +856,39 @@ class MainWindow(QMainWindow):
                 location + str(exc),
             )
             return
-        self.doc = doc
-        self._set_document(doc, reset_view=True)
-        self.editor_panel.mark_synced()
+        # Replace a pristine untitled tab instead of opening yet another one.
+        if (
+            self._current_tab() is not None
+            and not self.doc.path
+            and self._is_default_document()
+        ):
+            tab = self.tabs[self._active_tab]
+            tab.doc = doc
+            tab.editor_text = ""
+            tab.selection = None
+            tab.active_cell = None
+            tab.selected_rows = []
+            self._set_document(doc, reset_view=True)
+            self._refresh_tab_titles()
+        else:
+            self._new_tab(doc, reset_view=True)
         self.settings.add_recent(path)
         self._sync_config_actions()
         self._update_title()
         self._show_status(self._tr(f"Opened {Path(path).name}", f"已打开 {Path(path).name}"))
         if doc.notes:
             self._show_status("Note: " + " ".join(doc.notes[:2]), 8000)
+
+    def _is_default_document(self) -> bool:
+        """True when the active tab still holds the untouched sample document."""
+        if self.doc.path or self.doc.dirty:
+            return False
+        if self._editor_text_dirty():
+            return False
+        try:
+            return self.doc.snapshot() == WaveDocument().snapshot()
+        except Exception:
+            return False
 
     def _save_dialog(self) -> bool:
         start = self.doc.path or str(Path(self.settings.get("last_directory", "")) or Path.home())
@@ -784,9 +1064,23 @@ class MainWindow(QMainWindow):
     # ==================================================================
     def _on_canvas_edited(self, reason: str) -> None:
         self._sync_editor_from_doc()
+        self._sync_editor_wave_focus()
         self._update_title()
         self._update_actions()
         self._update_status()
+
+    def _sync_editor_wave_focus(self) -> None:
+        """Re-apply the wave-line highlight after the editor text was refreshed."""
+        if self._inline_editing or self._view_mode == "wave" or not self.canvas.hasFocus():
+            return
+        selection = self.canvas.selection
+        if selection is not None:
+            sel = selection.normalized()
+            self.editor_panel.focus_wave(sel.row0, sel.col0, sel.col1)
+            return
+        rows = self.canvas.selected_rows()
+        if rows:
+            self.editor_panel.focus_wave(min(rows), -1, -1)
 
     def _on_selection_changed(self) -> None:
         self._update_actions()
@@ -806,11 +1100,40 @@ class MainWindow(QMainWindow):
         self.settings.set("zoom", round(zoom, 4), save=False)
         self._update_status()
 
+    def _on_insert_mode_changed(self, enabled: bool) -> None:
+        action = self.actions.get("toggle_insert_mode")
+        if action is not None:
+            action.setChecked(enabled)
+        if enabled:
+            self._show_status(
+                self._tr(
+                    "Insert mode: type wave characters, Esc or middle-click to exit",
+                    "插入模式：输入波形字符，按 Esc 或中键退出",
+                ),
+                6000,
+            )
+        else:
+            self._update_status()
+        self._update_actions()
+
+    def _on_wave_focus(self, row: int, start: int, end: int) -> None:
+        """Follow the waveform selection in the JSON editor (requirement 4.7)."""
+        if self._inline_editing or self._switching_tab or self._applying_json:
+            return
+        if self._view_mode == "wave" or not self.canvas.hasFocus():
+            return
+        self.editor_panel.focus_wave(row, start, end)
+
     def _on_canvas_edit_state(self, editing: bool) -> None:
         self._inline_editing = editing
         self._update_actions()
 
     def _show_context_menu(self, global_pos: QPoint, row: int, col: int) -> None:
+        menu = self._build_context_menu()
+        menu.exec(global_pos)
+
+    def _build_context_menu(self) -> QMenu:
+        """Build the waveform context menu (separate for testability)."""
         menu = QMenu(self)
         menu.addAction(self.actions["edit_active"])
         menu.addAction(self.actions["edit_data"])
@@ -818,13 +1141,53 @@ class MainWindow(QMainWindow):
         for action_id in ("row_cut", "row_copy", "row_paste", "row_duplicate", "row_delete"):
             menu.addAction(self.actions[action_id])
         menu.addSeparator()
-        for action_id in ("row_insert_above", "row_insert_below", "row_properties", "row_clear"):
+        group_span = self.canvas.selected_group_span()
+        if group_span is not None:
+            menu.addAction(self.actions["ungroup_selection"])
+            menu.addAction(self.actions["rename_group"])
+        else:
+            menu.addAction(self.actions["group_selection"])
+        menu.addSeparator()
+        for action_id in ("row_insert_above", "row_insert_below", "row_insert_spacer", "row_properties", "row_clear"):
+            menu.addAction(self.actions[action_id])
+        timing = menu.addMenu(self._tr("Period / Phase", "周期 / 相位"))
+        for label, callback in (
+            (self._tr("Period +1", "Period +1"), lambda: self._adjust_period(1)),
+            (self._tr("Period −1", "Period −1"), lambda: self._adjust_period(-1)),
+            (self._tr("Phase +0.5", "Phase +0.5"), lambda: self._adjust_phase(0.5)),
+            (self._tr("Phase −0.5", "Phase −0.5"), lambda: self._adjust_phase(-0.5)),
+        ):
+            item = timing.addAction(label)
+            item.triggered.connect(lambda checked=False, fn=callback: fn())
+        timing.addAction(self.actions["row_properties"])
+        menu.addSeparator()
+        for action_id in ("delete_cells", "insert_cycle_before", "insert_cycle_after", "toggle_insert_mode"):
             menu.addAction(self.actions[action_id])
         menu.addSeparator()
         menu.addAction(self.actions["cell_copy"])
         menu.addAction(self.actions["cell_paste"])
         menu.addAction(self.actions["clear_cells"])
-        menu.exec(global_pos)
+        return menu
+
+    def _adjust_period(self, delta: int) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            return
+        row = self.doc.row(rows[0])
+        if row is None:
+            return
+        if self.doc.set_period(rows[0], row.period + delta):
+            self._after_model_edit(selection=rows)
+
+    def _adjust_phase(self, delta: float) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            return
+        row = self.doc.row(rows[0])
+        if row is None:
+            return
+        if self.doc.set_phase(rows[0], max(0.0, row.phase + delta)):
+            self._after_model_edit(selection=rows)
 
     # ==================================================================
     # Action dispatch
@@ -853,6 +1216,18 @@ class MainWindow(QMainWindow):
             "row_insert_above": lambda: self._insert_signal("above"),
             "row_insert_below": lambda: self._insert_signal("below"),
             "row_add": lambda: self._insert_signal("end"),
+            "row_insert_spacer": self._insert_spacer,
+            "delete_cells": self._delete_cells,
+            "insert_cycle_before": lambda: self._insert_cycle(True),
+            "insert_cycle_after": lambda: self._insert_cycle(False),
+            "toggle_insert_mode": self._toggle_insert_mode,
+            "group_selection": self._group_selection,
+            "ungroup_selection": self._ungroup_selection,
+            "rename_group": lambda: self._rename_group_at(*self._active_group_range()),
+            "diagram_config": self._open_diagram_settings,
+            "next_tab": self.next_tab,
+            "prev_tab": self.previous_tab,
+            "close_tab": self.close_current_tab,
             "row_duplicate": self._duplicate_rows,
             "row_copy": self._copy_rows,
             "row_cut": self._cut_rows,
@@ -948,13 +1323,13 @@ class MainWindow(QMainWindow):
 
     def _select_rows(self, rows: list[int]) -> None:
         if not self.doc.rows:
-            self.canvas.row_selection = None
+            self.canvas.set_row_selection([])
             self.canvas.active_cell = None
             return
         rows = [r for r in rows if 0 <= r < len(self.doc.rows)]
         if not rows:
             return
-        self.canvas.row_selection = (min(rows), max(rows))
+        self.canvas.set_row_selection(rows)
         self.canvas.active_cell = (min(rows), 0)
         self.canvas.selection = None
         self.canvas._anchor = None
@@ -993,6 +1368,31 @@ class MainWindow(QMainWindow):
         name = self._unique_signal_name()
         new_index = self.doc.insert_blank(index, name=name)
         self._after_model_edit(selection=[new_index])
+        if where == "end":
+            # Ctrl+Enter: jump straight into the new signal's name field.
+            self.canvas.edit_name_at(new_index)
+
+    def _insert_spacer(self) -> None:
+        rows = self._selected_rows()
+        index = (rows[-1] + 1) if rows else len(self.doc.rows)
+        new_index = self.doc.add_spacer_row(index)
+        self._after_model_edit(selection=[new_index])
+        self._show_status(self._tr("Inserted empty row {}", "已插入空行 {}"))
+
+    def _delete_cells(self) -> None:
+        self.canvas.delete_selection()
+
+    def _insert_cycle(self, before: bool) -> None:
+        changed = self.canvas.insert_cycles(before=before)
+        if changed:
+            self._show_status(
+                self._tr("Inserted one cycle", "已插入一个波形周期")
+            )
+        self.canvas.setFocus(Qt.OtherFocusReason)
+
+    def _toggle_insert_mode(self) -> None:
+        self.canvas.set_insert_mode(not self.canvas.insert_mode)
+        self.canvas.setFocus(Qt.OtherFocusReason)
 
     def _duplicate_rows(self) -> None:
         rows = self._selected_rows()
@@ -1079,6 +1479,87 @@ class MainWindow(QMainWindow):
             changed = self.doc.update_row(rows[0], dialog.values())
             if changed:
                 self._after_model_edit(selection=rows)
+
+    # ------------------------------------------------------------------
+    # Signal groups
+    # ------------------------------------------------------------------
+    def _active_group_range(self) -> tuple[int, int]:
+        span = self.canvas.selected_group_span()
+        if span is not None:
+            return span.start, span.end
+        rows = self._selected_rows()
+        if rows:
+            return min(rows), max(rows)
+        return 0, -1
+
+    def _group_selection(self) -> None:
+        rows = sorted(self._selected_rows())
+        if not rows:
+            self._show_status(self._tr("Select one or more signals first", "请先选择要分组的信号"))
+            return
+        title = self._tr("Group Signals", "信号分组")
+        label = self._tr("Group name:", "分组名称：")
+        name, ok = QInputDialog.getText(self, title, label, text="group")
+        if not ok:
+            return
+        name = (name or "").strip() or "group"
+        new_rows = self.doc.group_rows(rows, name)
+        if not new_rows:
+            return
+        self._after_model_edit(selection=new_rows)
+        self._show_status(self._tr(f'Created group "{name}"', f'已创建分组“{name}”'))
+
+    def _ungroup_selection(self) -> None:
+        rows = sorted(self._selected_rows())
+        if not rows:
+            self._show_status(self._tr("Select a group first", "请先选择分组"))
+            return
+        new_rows = self.doc.ungroup_rows(rows)
+        if not new_rows:
+            self._show_status(self._tr("The selection is not a complete group", "所选内容不是完整的分组"))
+            return
+        self._after_model_edit(selection=new_rows)
+        self._show_status(self._tr("Group dissolved", "已取消分组"))
+
+    def _rename_group_at(self, start: int, end: int) -> None:
+        if end < start:
+            return
+        span = self.doc.span_at_row(start)
+        if span is None:
+            span = self.doc.span_at_row(end)
+        if span is None:
+            self._show_status(self._tr("No group at the selection", "所选位置没有分组"))
+            return
+        title = self._tr("Rename Group", "重命名分组")
+        label = self._tr("Group name:", "分组名称：")
+        current = span.group.display_name
+        name, ok = QInputDialog.getText(self, title, label, text=current)
+        if not ok:
+            return
+        name = (name or "").strip()
+        if not name or name == current:
+            return
+        if self.doc.rename_group(span.start, name):
+            self._after_model_edit(selection=list(range(span.start, span.end + 1)))
+            self._show_status(self._tr(f'Renamed group to "{name}"', f'分组已重命名为“{name}”'))
+
+    def _open_diagram_settings(self) -> None:
+        dialog = DiagramSettingsDialog(self, self.doc, language=self.language)
+        if not dialog.exec():
+            return
+        values = dialog.values()
+        changed = self.doc.apply_diagram_settings(
+            skin=values["skin"],
+            hscale=values["hscale"],
+            head=values["head"],
+            foot=values["foot"],
+        )
+        if changed:
+            self._after_model_edit()
+            self._show_status(self._tr("Diagram settings applied", "波形图设置已应用"))
+        else:
+            self.canvas.refresh()
+            self._sync_editor_from_doc()
 
     def _add_column(self) -> None:
         self.doc.add_columns(1)
@@ -1245,10 +1726,29 @@ class MainWindow(QMainWindow):
     # ==================================================================
     # Export / clipboard
     # ==================================================================
+    def _export_default_path(self, suffix: str) -> str:
+        """Default export path: the current file name in the last export folder."""
+        doc = self.doc
+        directory = self.settings.get("export_directory", "") or ""
+        if not directory:
+            if doc.path:
+                directory = str(Path(doc.path).parent)
+            else:
+                directory = str(self.settings.get("last_directory", "") or Path.home())
+        stem = Path(doc.path).stem if doc.path else self._tr("waveform", "waveform")
+        return str(Path(directory) / f"{stem}{suffix}")
+
+    def _remember_export_path(self, path: str) -> None:
+        try:
+            directory = str(Path(path).resolve().parent)
+        except OSError:
+            directory = str(Path(path).parent)
+        self.settings.set("export_directory", directory, save=True)
+
     def _export_png(self) -> None:
         self.canvas.commit_editing()
         self.editor_panel.flush_pending()
-        start = str(Path(self.settings.get("last_directory", "")) or Path.home()) + os.sep + "waveform.png"
+        start = self._export_default_path(".png")
         path, _ = QFileDialog.getSaveFileName(
             self, self._tr("Export PNG", "导出 PNG"), start, self._tr("PNG images (*.png)", "PNG 图片 (*.png)")
         )
@@ -1263,12 +1763,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, self._tr("Export failed", "导出失败"), str(exc))
             return
+        self._remember_export_path(path)
         self._show_status(self._tr(f"Exported {Path(path).name}", f"已导出 {Path(path).name}"))
 
     def _export_svg(self) -> None:
         self.canvas.commit_editing()
         self.editor_panel.flush_pending()
-        start = str(Path(self.settings.get("last_directory", "")) or Path.home()) + os.sep + "waveform.svg"
+        start = self._export_default_path(".svg")
         path, _ = QFileDialog.getSaveFileName(
             self, self._tr("Export SVG", "导出 SVG"), start, self._tr("SVG images (*.svg)", "SVG 图片 (*.svg)")
         )
@@ -1297,6 +1798,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, self._tr("Export failed", "导出失败"), str(exc))
             return
+        self._remember_export_path(path)
         self._show_status(self._tr(f"Exported {Path(path).name}", f"已导出 {Path(path).name}"))
 
     def _copy_image(self) -> None:
@@ -1343,6 +1845,7 @@ class MainWindow(QMainWindow):
                 "auto_extend_clocks": values["auto_extend_clocks"],
                 "auto_advance_cell": values["auto_advance_cell"],
                 "live_json_sync": values["live_json_sync"],
+                "link_wave_skin_to_theme": values["link_wave_skin_to_theme"],
                 "show_shortcut_help_on_start": values["show_shortcut_help_on_start"],
                 "editor_wrap": values["editor_wrap"],
                 "editor_font_size": values["editor_font_size"],
@@ -1371,6 +1874,8 @@ class MainWindow(QMainWindow):
             self.retranslate_ui()
         if new_theme != old_theme or old_theme == "auto":
             self._apply_theme(new_theme)
+        else:
+            self._sync_wave_skin_for_theme()
         self._update_title()
         self._update_actions()
         self._update_status()
@@ -1447,6 +1952,31 @@ class MainWindow(QMainWindow):
         if not initial:
             self.settings.save()
         self._sync_config_actions()
+        self._sync_wave_skin_for_theme()
+
+    def _sync_wave_skin_for_theme(self) -> None:
+        """Keep the waveform skin in sync with the dark/light UI theme."""
+        if not self.settings.get("link_wave_skin_to_theme", True):
+            return
+        if not hasattr(self, "doc") or self.doc is None or not hasattr(self, "canvas"):
+            return
+        current = self.doc.skin_name()
+        if self.theme.dark:
+            if current == "dark":
+                return
+            self.settings.set("light_skin", current, save=False)
+            target = "dark"
+        else:
+            if current != "dark":
+                return
+            target = self.settings.get("light_skin", "default") or "default"
+        mark_dirty = bool(self.doc.path) or self.doc.dirty
+        if self.doc.set_skin(target, record=False, mark_dirty=mark_dirty):
+            self.canvas.refresh()
+            self._sync_editor_from_doc()
+            self._sync_config_actions()
+            self._update_title()
+            self._update_status()
 
     def _toggle_theme(self) -> None:
         new = "light" if self.theme.dark else "dark"
@@ -1522,6 +2052,8 @@ class MainWindow(QMainWindow):
         name = Path(self.doc.path).name if self.doc.path else self._tr("Untitled", "未命名")
         star = " *" if (self.doc.dirty or self._editor_text_dirty()) else ""
         self.setWindowTitle(f"{name}{star} — {APP_NAME} {__version__}")
+        if hasattr(self, "tab_bar"):
+            self._refresh_tab_titles()
 
     def _show_status(self, message: str, timeout: int = 4500) -> None:
         if not hasattr(self, "status_message"):
@@ -1538,17 +2070,30 @@ class MainWindow(QMainWindow):
         has_rows = bool(self.doc.rows)
         has_selection = bool(self.canvas.selection or self.canvas.active_cell)
         canvas_scope = [d.id for d in self.registry.actions.values() if d.scope == "canvas"]
-        always_available = {"row_add", "row_insert_above", "row_insert_below", "row_paste", "tool_select"}
+        always_available = {
+            "row_add",
+            "row_insert_above",
+            "row_insert_below",
+            "row_insert_spacer",
+            "row_paste",
+            "tool_select",
+        }
         for action_id in canvas_scope:
             enabled = (has_rows or action_id in always_available) and not self._inline_editing
-            if action_id in ("cell_copy", "cell_paste", "clear_cells"):
+            if action_id in ("cell_copy", "cell_paste", "clear_cells", "delete_cells"):
                 enabled = enabled and has_selection and has_rows
+            if action_id in ("group_selection", "ungroup_selection", "rename_group"):
+                enabled = enabled and bool(self._selected_rows()) and has_rows
             action = self.actions.get(action_id)
             if action is not None:
                 action.setEnabled(enabled)
         multi = len(self.doc.rows) > 1 and not self._inline_editing
         self.actions["row_move_up"].setEnabled(multi)
         self.actions["row_move_down"].setEnabled(multi)
+        self.actions["next_tab"].setEnabled(len(self.tabs) > 1)
+        self.actions["prev_tab"].setEnabled(len(self.tabs) > 1)
+        self.actions["close_tab"].setEnabled(len(self.tabs) >= 1)
+        self.actions["diagram_config"].setEnabled(True)
         self.actions["row_properties"].setEnabled(has_rows and not self._inline_editing)
         self.actions["row_clear"].setEnabled(has_rows and not self._inline_editing)
         self.actions["add_column"].setEnabled(has_rows)
@@ -1597,11 +2142,21 @@ class MainWindow(QMainWindow):
         self.settings.save()
 
     def closeEvent(self, event) -> None:
-        if not self._maybe_save():
+        if not self._confirm_close_all_tabs():
             event.ignore()
             return
         self._save_window_state()
         event.accept()
+
+    def _confirm_close_all_tabs(self) -> bool:
+        self.canvas.commit_editing()
+        self._capture_tab_state()
+        for index in range(len(self.tabs)):
+            if index != self._active_tab:
+                self._activate_tab(index)
+            if not self._maybe_save():
+                return False
+        return True
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():

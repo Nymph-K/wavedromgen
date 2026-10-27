@@ -55,13 +55,16 @@ class PaintState:
     selection: Selection | None = None
     active_cell: tuple[int, int] | None = None
     hover_cell: tuple[int, int] | None = None
-    row_selection: tuple[int, int] | None = None
+    row_selection: tuple[int, ...] | None = None
     drag: DragState = field(default_factory=DragState)
     editing_target: EditTarget | None = None
     focused: bool = True
     show_chrome: bool = True
     show_selection: bool = True
     compact: bool = False
+
+    def row_selected(self, index: int) -> bool:
+        return bool(self.row_selection) and index in self.row_selection
 
 
 class WaveRenderer:
@@ -90,6 +93,8 @@ class WaveRenderer:
         self._paint_gaps(painter, layout, skin)
         if state.show_selection:
             self._paint_selection(painter, layout, state, colors)
+        if layout.groups:
+            self._paint_groups(painter, layout, skin, colors, state)
         self._paint_names(painter, layout, skin, state)
         self._paint_data_labels(painter, layout, skin, state)
         self._paint_nodes_and_edges(painter, layout, skin, colors)
@@ -166,7 +171,7 @@ class WaveRenderer:
                     QRectF(layout.gutter_width, row.slot_top, layout.width - layout.gutter_width, layout.row_height),
                     colors.row_alt,
                 )
-            if state.row_selection and state.row_selection[0] <= row.index <= state.row_selection[1]:
+            if state.row_selected(row.index):
                 painter.fillRect(
                     QRectF(0, row.slot_top, layout.width, layout.row_height),
                     QColor(colors.accent.red(), colors.accent.green(), colors.accent.blue(), 26),
@@ -309,11 +314,8 @@ class WaveRenderer:
             if row_index < 0 or row_index >= len(layout.rows):
                 continue
             row = layout.rows[row_index]
-            length = len(row.row.wave)
-            if length == 0:
-                continue
             col0 = max(0, sel.col0)
-            col1 = min(sel.col1, length - 1)
+            col1 = max(col0, sel.col1)
             if col1 < col0:
                 continue
             x0 = row.char_x(col0)
@@ -335,12 +337,70 @@ class WaveRenderer:
             row_index, col = state.active_cell
             if 0 <= row_index < len(layout.rows):
                 row = layout.rows[row_index]
-                if 0 <= col < len(row.row.wave):
+                if 0 <= col <= layout.max_column():
                     rect = row.char_rect(col, layout.row_height).adjusted(1, 1, -1, -1)
                     pen = QPen(colors.accent, max(1.5, 2.0 * layout.zoom))
                     painter.setPen(pen)
                     painter.setBrush(Qt.NoBrush)
                     painter.drawRoundedRect(rect, 3 * layout.zoom, 3 * layout.zoom)
+
+    # ------------------------------------------------------------------
+    def _paint_groups(
+        self,
+        painter: QPainter,
+        layout: DiagramLayout,
+        skin: Skin,
+        colors: CanvasColors,
+        state: PaintState,
+    ) -> None:
+        """Draw WaveDrom signal groups: a rounded bracket plus a rotated name."""
+        z = layout.zoom
+        font = font_for_skin(skin, 0.74 * z)
+        painter.save()
+        painter.setFont(font)
+        metrics = QFontMetricsF(font)
+        info = QColor("#5b8def") if skin.dark else QColor("#0041c4")
+        selected_rows = set(state.row_selection or ())
+        for group in layout.groups:
+            rows = range(group.span.start, group.span.end + 1)
+            selected = bool(selected_rows) and all(index in selected_rows for index in rows)
+            color = colors.accent if selected else info
+            x = group.x
+            top = group.top
+            bottom = group.bottom
+            radius = max(2.0, 5.0 * z)
+            path = QPainterPath()
+            path.moveTo(x, top)
+            path.cubicTo(x - radius * 0.6, top, x - radius, top + radius * 0.5, x - radius, top + radius)
+            path.lineTo(x - radius, max(top + radius, bottom - radius))
+            path.cubicTo(x - radius, bottom - radius * 0.5, x - radius * 0.6, bottom, x, bottom)
+            if selected:
+                painter.fillRect(
+                    QRectF(x - radius - 2 * z, top, radius + 3 * z, max(1.0, bottom - top)),
+                    QColor(colors.accent.red(), colors.accent.green(), colors.accent.blue(), 36),
+                )
+            pen = QPen(color, max(1.0, 1.15 * z))
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(path)
+            name = group.name
+            if not name:
+                continue
+            painter.save()
+            painter.translate(group.name_x, (top + bottom) / 2.0)
+            painter.rotate(-90)
+            available = max(12.0, bottom - top - 6.0 * z)
+            text = metrics.elidedText(name, Qt.ElideRight, int(available))
+            width = metrics.horizontalAdvance(text) + 6.0 * z
+            painter.setPen(QPen(color if selected else skin.name_color))
+            painter.drawText(
+                QRectF(-width / 2.0, -metrics.height() / 2.0, width, metrics.height()),
+                int(Qt.AlignCenter | Qt.TextSingleLine),
+                text,
+            )
+            painter.restore()
+        painter.restore()
 
     # ------------------------------------------------------------------
     def _paint_names(
@@ -359,24 +419,38 @@ class WaveRenderer:
             text = row.name
             color = skin.name_color
             if not text:
-                if not layout.placeholder:
+                if not layout.placeholder or not row.shows_placeholder_name:
+                    # Bare ``{}`` spacer lanes and node-only lanes stay blank.
+                    if layout.chrome:
+                        self._paint_handle(
+                            painter,
+                            row_layout.handle_x,
+                            row_layout.slot_top + layout.row_height / 2,
+                            z,
+                            skin,
+                        )
                     continue
                 text = "signal"
                 color = QColor(skin.muted_color)
             painter.setPen(QPen(color))
             rect = QRectF(
-                row_layout.name_rect.left() + 6 * z,
+                row_layout.name_rect.left(),
                 row_layout.slot_top + 3 * z,
-                max(20.0, layout.wave_origin - row_layout.name_rect.left() - 16 * z),
+                max(20.0, layout.wave_origin - row_layout.name_rect.left() - 8 * z),
                 layout.row_height - 6 * z,
             )
             flags = int(Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine)
             painter.drawText(rect, flags, metrics.elidedText(text, Qt.ElideMiddle, int(rect.width())))
-            # A small move handle, drawn only in the app chrome.
+            # A small move handle at a fixed position, so long names never
+            # shift the drag affordance.
             if layout.chrome:
-                handle_x = layout.gutter_width - row_layout.name_rect.width() - 18 * z
-                handle_x = max(36 * z, handle_x)
-                self._paint_handle(painter, handle_x, row_layout.slot_top + layout.row_height / 2, z, skin)
+                self._paint_handle(
+                    painter,
+                    row_layout.handle_x,
+                    row_layout.slot_top + layout.row_height / 2,
+                    z,
+                    skin,
+                )
 
     def _paint_handle(self, painter: QPainter, x: float, y: float, z: float, skin: Skin) -> None:
         color = QColor(skin.muted_color)
@@ -779,20 +853,19 @@ def _draw_tee(painter: QPainter, point: QPointF, color: QColor, z: float) -> Non
 
 
 def _text_value(value) -> str:
+    return _text_value_raw(value).strip()
+
+
+def _text_value_raw(value) -> str:
+    """Flatten WaveDrom JSONML text without losing inner spaces."""
     if value is None:
         return ""
     if isinstance(value, str):
-        return value.strip()
+        return value
     if isinstance(value, (list, tuple)):
-        if not value:
-            return ""
-        parts = []
-        for item in value[1:]:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, (list, tuple)):
-                parts.append(_text_value(item))
-        return "".join(parts).strip()
+        return "".join(_text_value_raw(item) for item in value[1:])
+    if isinstance(value, dict):
+        return ""
     return str(value)
 
 
