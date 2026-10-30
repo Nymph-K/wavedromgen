@@ -20,6 +20,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from WaveDromGen.app import MainWindow, ensure_fonts  # noqa: E402
+from WaveDromGen.model import Selection  # noqa: E402
 from WaveDromGen.settings import Settings  # noqa: E402
 from WaveDromGen.theme import apply_theme, resolve_theme  # noqa: E402
 
@@ -654,8 +655,8 @@ class CycleEditingTests(GuiTestBase):
         editor = self.win.editor_panel.editor
         ranges = editor.wave_value_ranges()
         self.assertEqual(len(ranges), 2)
-        selection = editor._wave_selection
-        self.assertIsNotNone(selection)
+        self.assertTrue(editor._wave_selections)
+        selection = editor._wave_selections[-1]
         text = editor.toPlainText()
         start = selection.cursor.selectionStart() - ranges[1][0]
         end = selection.cursor.selectionEnd() - ranges[1][0]
@@ -713,6 +714,177 @@ class ThemeAndTabTests(GuiTestBase):
         self.win._close_tab(1)
         QTest.qWait(100)
         self.assertEqual(len(self.win.tabs), 1)
+
+
+class WaveEditingV22Tests(GuiTestBase):
+    """Regression tests for blank lanes, groups, insert mode and block edits."""
+
+    def _load(self, source):
+        self.win._apply_editor_text(json.dumps(source))
+        self.win.editor_panel.set_text(self.win._json_text())
+        self.win.editor_panel.mark_synced()
+        self.canvas.refresh()
+        QTest.qWait(70)
+
+    def test_blank_lanes_are_not_padded_by_other_lanes(self):
+        self._load({"signal": [{"name": "a", "wave": "01.."}, {}, {"name": "b", "wave": "10.."}]})
+        self._focus_canvas()
+        self.canvas.set_active_cell(0, 8)
+        QTest.keyClick(self.canvas, Qt.Key_1)
+        QTest.qWait(80)
+        self.assertEqual(self.win.doc.rows[1].wave, "")
+        self.assertEqual(self.win.doc.rows[2].wave, "10..")
+        self.assertEqual(self.win.doc.rows[0].wave, "01......1")
+
+    def test_group_label_is_not_covered_by_the_bracket(self):
+        from PySide6.QtCore import QRectF
+
+        self._load(
+            {
+                "signal": [
+                    ["Master", {"name": "a", "wave": "01.."}, {"name": "b", "wave": "10.."}],
+                    {"name": "c", "wave": "0..."},
+                ]
+            }
+        )
+        group = self.canvas._layout.groups[0]
+        self.assertGreaterEqual(group.x - group.name_x, 15.0)
+        bracket = QRectF(group.x - 6, group.top, 6, group.bottom - group.top)
+        self.assertFalse(group.name_rect.intersects(bracket))
+
+    def test_typing_dot_extends_empty_cycles(self):
+        self._load({"signal": [{"name": "a", "wave": "01.."}]})
+        self._focus_canvas()
+        self.canvas.set_active_cell(0, 7)
+        QTest.keyClick(self.canvas, Qt.Key_Period)
+        QTest.qWait(80)
+        self.assertEqual(self.win.doc.rows[0].wave, "01......")
+
+    def test_auto_advance_when_character_is_unchanged(self):
+        self._load({"signal": [{"name": "a", "wave": "01.."}]})
+        self._focus_canvas()
+        self.canvas.set_active_cell(0, 1)
+        QTest.keyClick(self.canvas, Qt.Key_1)  # same character as the cell
+        QTest.qWait(60)
+        self.assertEqual(self.canvas.active_cell, (0, 2))
+        self.canvas.set_auto_advance(False)
+        self.canvas.set_active_cell(0, 1)
+        QTest.keyClick(self.canvas, Qt.Key_1)
+        QTest.qWait(60)
+        self.assertEqual(self.canvas.active_cell, (0, 1))
+        self.canvas.set_auto_advance(True)
+
+    def test_palette_buttons_apply_characters_and_insert_cycles(self):
+        self._load({"signal": [{"name": "a", "wave": "...."}]})
+        texts = [button.text() for button in self.win.palette_buttons]
+        for char in "01x.z=2345pnudhl":
+            self.assertIn(char, texts)
+        self.assertTrue(self.win.palette_toggle.isCheckable())
+        self.canvas.set_active_cell(0, 0)
+        self.win._apply_palette_char("x")
+        QTest.qWait(80)
+        self.assertEqual(self.win.doc.rows[0].wave, "x...")
+        self.canvas.selection = Selection(0, 1, 0, 1)
+        self.win._insert_cycle(True)
+        QTest.qWait(60)
+        self.assertEqual(self.win.doc.rows[0].wave, "x....")
+
+    def test_middle_drag_selects_rows_and_inserts_into_all(self):
+        self._load(
+            {
+                "signal": [
+                    {"name": "a", "wave": "0123"},
+                    {"name": "b", "wave": "0123"},
+                    {"name": "c", "wave": "0123"},
+                ]
+            }
+        )
+        row0 = self.canvas._layout.rows[0]
+        row2 = self.canvas._layout.rows[2]
+        start = QPoint(15, int(row0.slot_top + 12))
+        end = QPoint(15, int(row2.slot_top + 12))
+        QTest.mousePress(self.canvas, Qt.MiddleButton, Qt.NoModifier, start)
+        QTest.mouseMove(self.canvas, end)
+        QTest.qWait(30)
+        QTest.mouseRelease(self.canvas, Qt.MiddleButton, Qt.NoModifier, end)
+        QTest.qWait(80)
+        self.assertEqual(self.canvas.selected_rows(), [0, 1, 2])
+        self.assertTrue(self.canvas.insert_mode)
+        self.canvas.setFocus(Qt.OtherFocusReason)
+        self.canvas.active_cell = (0, 1)
+        QTest.keyClick(self.canvas, Qt.Key_X)
+        QTest.qWait(80)
+        self.assertEqual([row.wave for row in self.win.doc.rows], ["0x123"] * 3)
+        self.canvas.set_insert_mode(False)
+
+    def test_insert_mode_button_and_caret(self):
+        from WaveDromGen.model import Selection as Sel
+
+        self._load(
+            {
+                "signal": [
+                    {"name": "a", "wave": "0123"},
+                    {"name": "b", "wave": "0123"},
+                ]
+            }
+        )
+        self.canvas.selection = Sel(0, 2, 1, 2)
+        self.canvas.active_cell = (0, 2)
+        self.win.palette_toggle.click()
+        QTest.qWait(60)
+        self.assertTrue(self.canvas.insert_mode)
+        self.assertTrue(self.win.palette_toggle.isChecked())
+        self.assertIn("INSERT", self.win.status_cursor.text())
+        # The canvas must render the insertion caret without errors.
+        image = self.canvas.grab()
+        self.assertFalse(image.isNull())
+        self.win.palette_toggle.click()
+        QTest.qWait(60)
+        self.assertFalse(self.canvas.insert_mode)
+
+    def test_multi_row_selection_selects_editor_lines(self):
+        self._load(
+            {
+                "signal": [
+                    {"name": "clk", "wave": "p......."},
+                    {"name": "bus", "wave": "x.==x...", "data": ["A", "B"]},
+                    {"name": "sig", "wave": "01......"},
+                ]
+            }
+        )
+        self._focus_canvas()
+        self.canvas.set_row_selection([1, 2])
+        self.canvas._emit_cursor_info()
+        QTest.qWait(80)
+        editor = self.win.editor_panel.editor
+        cursor = editor.textCursor()
+        self.assertTrue(cursor.hasSelection())
+        selected = cursor.selectedText()
+        self.assertIn("x.==x...", selected)
+        self.assertIn("01......", selected)
+
+    def test_rectangular_block_copy_and_paste(self):
+        self._load(
+            {
+                "signal": [
+                    {"name": "a", "wave": "012345"},
+                    {"name": "b", "wave": "012345"},
+                ]
+            }
+        )
+        self.canvas.selection = Selection(0, 1, 1, 3)
+        self.assertEqual(self.canvas.cell_text(), "123\n123")
+        self.canvas.selection = Selection(0, 4, 1, 4)
+        QApplication.clipboard().setText("123\n123")
+        self.win._paste_cells()
+        QTest.qWait(80)
+        self.assertEqual([row.wave for row in self.win.doc.rows], ["0123123", "0123123"])
+        # A single copied line pasted into one cell spans several cycles.
+        QApplication.clipboard().setText("99")
+        self.canvas.set_active_cell(0, 0)
+        self.win._paste_cells()
+        QTest.qWait(80)
+        self.assertEqual(self.win.doc.rows[0].wave, "9923123")
 
 
 if __name__ == "__main__":

@@ -61,6 +61,7 @@ class PaintState:
     focused: bool = True
     show_chrome: bool = True
     show_selection: bool = True
+    insert_mode: bool = False
     compact: bool = False
 
     def row_selected(self, index: int) -> bool:
@@ -98,6 +99,8 @@ class WaveRenderer:
         self._paint_names(painter, layout, skin, state)
         self._paint_data_labels(painter, layout, skin, state)
         self._paint_nodes_and_edges(painter, layout, skin, colors)
+        if state.insert_mode:
+            self._paint_insert_caret(painter, layout, state, colors)
         if layout.chrome:
             self._paint_chrome_foreground(painter, layout, colors, state)
         if state.drag.active:
@@ -390,9 +393,14 @@ class WaveRenderer:
             painter.save()
             painter.translate(group.name_x, (top + bottom) / 2.0)
             painter.rotate(-90)
-            available = max(12.0, bottom - top - 6.0 * z)
-            text = metrics.elidedText(name, Qt.ElideRight, int(available))
-            width = metrics.horizontalAdvance(text) + 6.0 * z
+            # WaveDrom renders the full group name.  Only extremely long names
+            # are elided so that adjacent groups remain distinguishable.
+            max_width = max(200.0 * z, bottom - top)
+            if metrics.horizontalAdvance(name) > max_width:
+                text = metrics.elidedText(name, Qt.ElideRight, int(max_width))
+            else:
+                text = name
+            width = metrics.horizontalAdvance(text) + 4.0 * z
             painter.setPen(QPen(color if selected else skin.name_color))
             painter.drawText(
                 QRectF(-width / 2.0, -metrics.height() / 2.0, width, metrics.height()),
@@ -400,6 +408,69 @@ class WaveRenderer:
                 text,
             )
             painter.restore()
+        painter.restore()
+
+    # ------------------------------------------------------------------
+    def _paint_insert_caret(
+        self,
+        painter: QPainter,
+        layout: DiagramLayout,
+        state: PaintState,
+        colors: CanvasColors,
+    ) -> None:
+        """Show where insert mode will push the next waveform character."""
+        if state.active_cell is None:
+            return
+        row_index, col = state.active_cell
+        if row_index < 0 or row_index >= len(layout.rows):
+            return
+        rows = [row_index]
+        if state.selection is not None:
+            sel = state.selection.normalized()
+            rows = [
+                index
+                for index in range(sel.row0, sel.row1 + 1)
+                if 0 <= index < len(layout.rows)
+            ]
+        elif state.row_selection:
+            rows = [index for index in state.row_selection if 0 <= index < len(layout.rows)]
+        if not rows:
+            return
+        z = layout.zoom
+        painter.save()
+        painter.setClipRect(
+            QRectF(
+                layout.wave_origin,
+                layout.rows_top,
+                max(0.0, layout.width - layout.wave_origin),
+                max(1, len(layout.rows)) * layout.row_height,
+            )
+        )
+        top = layout.rows[rows[0]].slot_top + 2.0 * z
+        bottom = layout.rows[rows[-1]].slot_top + layout.row_height - 2.0 * z
+        accent = colors.accent
+        band = QColor(accent.red(), accent.green(), accent.blue(), 34)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(band)
+        for index in rows:
+            row = layout.rows[index]
+            x = row.char_x(col)
+            painter.fillRect(
+                QRectF(x, row.slot_top + 1.5 * z, row.char_width, layout.row_height - 3.0 * z),
+                band,
+            )
+        x = layout.rows[rows[0]].char_x(col)
+        pen = QPen(accent, max(1.5, 2.0 * z))
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(x, top), QPointF(x, bottom))
+        # Small I-beam caps make the insertion column obvious even on clocks.
+        cap = max(3.0, 4.0 * z)
+        painter.drawLine(QPointF(x - cap, top), QPointF(x + cap, top))
+        painter.drawLine(QPointF(x - cap, bottom), QPointF(x + cap, bottom))
+        painter.setBrush(accent)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(x, top), max(1.5, 2.0 * z), max(1.5, 2.0 * z))
         painter.restore()
 
     # ------------------------------------------------------------------

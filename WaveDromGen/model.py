@@ -1164,7 +1164,9 @@ class WaveDocument:
             return
         index = max(0, min(index, len(self.rows)))
         for row in new_rows:
-            row.ensure_length(max(1, len(row.wave)))
+            # Never turn a pasted ``{}`` spacer lane into ``0`` here.
+            if row.wave:
+                row.ensure_length(len(row.wave))
         self._insert_nodes_at(index, new_rows)
         self._rebuild_rows()
         if self.auto_extend_clocks:
@@ -1343,27 +1345,31 @@ class WaveDocument:
         return True
 
     def apply_wave_chars(self, cells: Iterable[tuple[int, int]], char: str, *, tag: str = "wave") -> int:
-        """Set the same raw wave character in every selected cell."""
+        """Set the same raw wave character in every selected cell.
+
+        Only the lanes that actually contain selected cells are extended, so
+        painting into the empty area on the right never pads unrelated (or
+        blank ``{}``) lanes with ``0.....``.
+        """
         char = sanitize_wave_char(char)
         if char is None:
             return 0
+        cell_list = list(cells)
+        if not cell_list:
+            return 0
         self._record(tag, coalesce=True)
         changed = 0
-        # Extend the document to cover all selected columns first, so painting
-        # into the empty area to the right works as expected.
-        max_col = -1
-        cell_list = list(cells)
+        by_row: dict[int, list[int]] = {}
         for y, x in cell_list:
-            max_col = max(max_col, x)
-        if max_col >= 0:
-            for row in self.rows:
-                row.ensure_length(max_col + 1)
-        for y, x in cell_list:
+            by_row.setdefault(int(y), []).append(int(x))
+        for y, columns in by_row.items():
             row = self.row(y)
             if row is None:
                 continue
-            if row.set_wave_char(x, char):
-                changed += 1
+            for x in columns:
+                grew = row.ensure_length(x + 1)
+                if row.set_wave_char(x, char) or grew:
+                    changed += 1
         if self.auto_extend_clocks:
             self.fit_clocks(record=False)
         if changed:
@@ -1381,15 +1387,12 @@ class WaveDocument:
             return self.apply_wave_chars(cell_list, chars)
         self._record("wave-paste")
         changed = 0
-        max_col = max((x for _, x in cell_list), default=-1)
-        if max_col >= 0:
-            for row in self.rows:
-                row.ensure_length(max_col + 1)
         for (y, x), char in zip(cell_list, chars):
             row = self.row(y)
             if row is None:
                 continue
-            if row.set_wave_char(x, char):
+            grew = row.ensure_length(x + 1)
+            if row.set_wave_char(x, char) or grew:
                 changed += 1
         if self.auto_extend_clocks:
             self.fit_clocks(record=False)
@@ -1397,8 +1400,49 @@ class WaveDocument:
             self._dirty = True
         return changed
 
+    def apply_wave_block(self, top: int, left: int, text: str, *, tag: str = "wave-block") -> int:
+        """Paste a rectangular block of waveform characters at ``(top, left)``.
+
+        Every line is written to one lane starting at ``left``; characters the
+        WaveDrom syntax does not know are skipped.
+        """
+        lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        while lines and not lines[-1]:
+            lines.pop()
+        if not lines:
+            return 0
+        top = max(0, int(top))
+        left = max(0, int(left))
+        self._record(tag)
+        changed = 0
+        for dy, line in enumerate(lines):
+            row = self.row(top + dy)
+            if row is None:
+                continue
+            for dx, char in enumerate(line):
+                value = sanitize_wave_char(char)
+                if value is None:
+                    continue
+                x = left + dx
+                grew = row.ensure_length(x + 1)
+                if row.set_wave_char(x, value) or grew:
+                    changed += 1
+        if self.auto_extend_clocks:
+            self.fit_clocks(record=False)
+        if changed:
+            self._dirty = True
+        return changed
+
     def clear_cells(self, cells: Iterable[tuple[int, int]]) -> int:
-        return self.apply_wave_chars(cells, ".", tag="clear-cells")
+        """Set existing cells to "." without extending or creating lanes."""
+        existing: list[tuple[int, int]] = []
+        for y, x in cells:
+            row = self.row(y)
+            if row is not None and row.wave and 0 <= x < len(row.wave):
+                existing.append((y, x))
+        if not existing:
+            return 0
+        return self.apply_wave_chars(existing, ".", tag="clear-cells")
 
     def delete_cells(self, cells: Iterable[tuple[int, int]]) -> int:
         """Delete waveform characters (cycles) from the selected cells."""
@@ -1453,23 +1497,31 @@ class WaveDocument:
             self._dirty = True
         return changed
 
-    def insert_text(self, index: int, column: int, chars: str) -> bool:
-        """Insert typed characters at a column, padding short/empty lanes."""
-        row = self.row(index)
-        if row is None or not chars:
-            return False
+    def insert_text_rows(self, indices: Iterable[int], column: int, chars: str) -> int:
+        """Insert typed characters at a column in several lanes at once."""
+        targets = sorted({int(i) for i in indices if 0 <= int(i) < len(self.rows)})
+        if not targets or not chars:
+            return 0
         self._record("insert-text")
         column = max(0, int(column))
-        if len(row.wave) < column:
-            row.ensure_length(column)
-        if not row.wave:
-            row.ensure_length(max(1, column + len(chars)))
-        changed = row.insert_wave(column, chars)
+        changed = 0
+        for index in targets:
+            row = self.rows[index]
+            if len(row.wave) < column:
+                row.ensure_length(column)
+            if not row.wave:
+                row.ensure_length(max(1, column + len(chars)))
+            if row.insert_wave(column, chars):
+                changed += 1
         if self.auto_extend_clocks:
             self.fit_clocks(record=False)
         if changed:
             self._dirty = True
         return changed
+
+    def insert_text(self, index: int, column: int, chars: str) -> bool:
+        """Insert typed characters at a column, padding short/empty lanes."""
+        return bool(self.insert_text_rows([index], column, chars))
 
     def clear_row(self, index: int, *, keep_name: bool = True) -> bool:
         row = self.row(index)

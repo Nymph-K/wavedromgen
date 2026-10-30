@@ -20,7 +20,7 @@ from .wavedrom_render import (
     lane_layout,
 )
 
-GROUP_LEVEL_WIDTH = 20.0  # px per nesting level, matches WaveDrom's 20px socket
+GROUP_LEVEL_WIDTH = 26.0  # px per nesting level: bracket + rotated group name
 MAX_SELECTION_COLUMNS = 512
 
 
@@ -176,9 +176,9 @@ class DiagramLayout:
         spans = doc.group_spans()
         self.max_depth = max((span.depth + 1 for span in spans), default=0)
         self.row_no_width = 34.0 * z if self.chrome else 0.0
-        self.group_origin = self.row_no_width + 4.0 * z
+        self.group_origin = self.row_no_width + 6.0 * z
         self.group_column_width = (
-            (self.max_depth * self.group_level_width + 8.0 * z) if self.max_depth else 0.0
+            (self.max_depth * self.group_level_width + 10.0 * z) if self.max_depth else 0.0
         )
 
         # Measure the widest name.
@@ -272,8 +272,10 @@ class DiagramLayout:
             top = self.rows[span.start].slot_top + 4.0 * z
             bottom = self.rows[span.end].slot_top + self.row_height - 4.0 * z
             x = self.group_origin + (span.depth + 1) * self.group_level_width
-            name_x = x - 9.0 * z
-            name_rect = QRectF(name_x - 8.0 * z, top, 16.0 * z, max(10.0, bottom - top))
+            # The rotated label sits in its own column left of the bracket so
+            # the bracket can never cover it, whatever the group name is.
+            name_x = x - 17.0 * z
+            name_rect = QRectF(name_x - 9.0 * z, top, 18.0 * z, max(10.0, bottom - top))
             groups.append(
                 GroupLayout(
                     span=span,
@@ -378,14 +380,10 @@ class DiagramLayout:
         ]
         if not candidates:
             return None
-        # Clicking further left selects the outer group, further right the
-        # deeper nested one, mirroring how the brackets are drawn.
-        candidates.sort(key=lambda group: group.x)
-        level = 0
-        if self.group_level_width > 0:
-            level = int(max(0.0, (x - self.group_origin) // self.group_level_width))
-        level = max(0, min(level, len(candidates) - 1))
-        return candidates[level]
+        # Clicking the bracket or its rotated name selects the nearest group;
+        # nested groups have their brackets further to the right.
+        bias = 4.0 * self.zoom
+        return min(candidates, key=lambda group: (abs(group.x - (x + bias)), -group.span.depth))
 
     def cell_at(self, x: float, y: float) -> tuple[int, int] | None:
         row = self.row_at(y)

@@ -421,6 +421,68 @@ class CompatibilityTests(unittest.TestCase):
         doc.apply_json_text(text)
         self.assertEqual(doc.dump_dict()["signal"], self.GROUP_DOC["signal"])
 
+    def test_editing_one_lane_keeps_blank_and_short_lanes(self):
+        doc = WaveDocument()
+        doc.load_dict(
+            {
+                "signal": [
+                    {"name": "a", "wave": "01.."},
+                    {},
+                    {"name": "b", "wave": "10.."},
+                ]
+            }
+        )
+        self.assertTrue(doc.apply_wave_chars([(0, 8)], "1"))
+        self.assertEqual(doc.rows[0].wave, "01......1")
+        self.assertEqual(doc.rows[1].wave, "")
+        self.assertEqual(doc.rows[2].wave, "10..")
+
+    def test_clearing_cells_never_creates_cycles(self):
+        doc = WaveDocument()
+        doc.load_dict({"signal": [{"name": "a", "wave": "01"}, {}]})
+        self.assertEqual(doc.clear_cells([(1, 5)]), 0)
+        self.assertEqual(doc.rows[1].wave, "")
+        self.assertEqual(doc.clear_cells([(0, 1), (0, 6)]), 1)
+        self.assertEqual(doc.rows[0].wave, "0.")
+
+    def test_apply_wave_block(self):
+        doc = WaveDocument()
+        doc.load_dict(
+            {
+                "signal": [
+                    {"name": "a", "wave": "012345"},
+                    {"name": "b", "wave": "012345"},
+                    {"name": "c", "wave": "012345"},
+                ]
+            }
+        )
+        self.assertEqual(doc.apply_wave_block(0, 1, "xx\ndd"), 4)
+        self.assertEqual(doc.rows[0].wave, "0xx345")
+        self.assertEqual(doc.rows[1].wave, "0dd345")
+        self.assertEqual(doc.rows[2].wave, "012345")
+        # A block wider than the lane extends only the pasted lanes.
+        self.assertEqual(doc.apply_wave_block(0, 4, "zzz"), 3)
+        self.assertEqual(doc.rows[0].wave, "0xx3zzz")
+        self.assertEqual(len(doc.rows[2].wave), 6)
+
+    def test_insert_text_into_multiple_lanes(self):
+        doc = WaveDocument()
+        doc.load_dict(
+            {
+                "signal": [
+                    {"name": "a", "wave": "0123"},
+                    {"name": "b", "wave": "0123"},
+                    {"name": "c", "wave": "0123"},
+                ]
+            }
+        )
+        self.assertEqual(doc.insert_text_rows([0, 2], 1, "x"), 2)
+        self.assertEqual(doc.rows[0].wave, "0x123")
+        self.assertEqual(doc.rows[1].wave, "0123")
+        self.assertEqual(doc.rows[2].wave, "0x123")
+        self.assertTrue(doc.insert_text(1, 0, "y"))
+        self.assertEqual(doc.rows[1].wave, "y0123")
+
 
 
 class SettingsTests(unittest.TestCase):

@@ -162,7 +162,10 @@ class SettingsDialog(QDialog):
         blayout = QVBoxLayout(behaviour)
         self.auto_clocks = QCheckBox("Automatically extend clk/clock lanes to the longest signal")
         self.auto_clocks.setChecked(bool(self.settings.get("auto_extend_clocks", True)))
-        self.auto_advance = QCheckBox("Advance the active cell after typing a waveform character")
+        self.auto_advance = QCheckBox(
+            "After typing any waveform character, jump to the next cycle "
+            "(even when the character is unchanged)"
+        )
         self.auto_advance.setChecked(bool(self.settings.get("auto_advance_cell", True)))
         self.live_sync = QCheckBox("Apply valid JSON to the waveform while typing")
         self.live_sync.setChecked(bool(self.settings.get("live_json_sync", True)))
@@ -851,11 +854,18 @@ def _characters_html(language: str) -> str:
     <p>Drag across cells to select a rectangle, then type any wave character. The character is written
     to every selected cell. <b>Delete</b> removes the selected cycles (the rest of the lane shifts left),
     <b>Shift+Delete</b> sets them to <code>.</code>, and <b>Ctrl+Shift+←/→</b> inserts one cycle before/after
-    the selection.</p>
+    the selection. <b>Copy Cells</b> / <b>Paste Cells</b> move the whole rectangular block: a copied
+    3×2 block is pasted as a 3×2 block, and pasting a single row into one cell fills several cycles.</p>
+    <h3>Waveform palette</h3>
+    <p>The palette above the canvas has one button per common wave character
+    (<code>0 1 x . z = 2 3 4 5 p n u d h l</code>), insert-cycle-left/right, delete-cycle and empty-row
+    buttons. Clicking a character writes it to the current selection, exactly like typing it.</p>
     <h3>Insert mode</h3>
-    <p>Click the middle mouse button on a waveform cell to toggle insert mode. Every character you type is
-    inserted at the cursor and the rest of the lane is pushed right; press <b>Esc</b> or the middle mouse
-    button again to leave insert mode.</p>
+    <p>Click the middle mouse button on a waveform cell to toggle insert mode, or use the <b>INS</b> palette
+    button. Every character you type is inserted at the caret and the rest of the lane is pushed right; a
+    vertical caret marks the insertion column. Press <b>Esc</b> or click the middle mouse button again to
+    leave insert mode. Drag with the middle mouse button in the gutter (or over the waveform) to select
+    several lanes; insert mode then inserts the character into every selected lane at once.</p>
     <h3>Clocks</h3>
     <p>Signals whose name contains <code>clk</code> or <code>clock</code> automatically follow the longest
     signal: they are extended <i>and</i> shortened. A clock is extended with <code>.</code>, so
@@ -877,9 +887,10 @@ def _gestures_html(language: str) -> str:
     <tr><td>Double-click a group bracket</td><td>Rename the group.</td></tr>
     <tr><td>Click a group bracket</td><td>Select every signal of the group (Ctrl+click toggles, Shift+click extends).</td></tr>
     <tr><td>Drag in the left gutter</td><td>Reorder the selected signals; groups keep their nested structure.</td></tr>
-    <tr><td>Drag on the waveform</td><td>Select a rectangular block of cells, including empty cycles to the right.</td></tr>
-    <tr><td>Middle click</td><td>Toggle insert mode at the clicked cell.</td></tr>
-    <tr><td>Type on a selection</td><td>Write a WaveDrom character to all selected cells.</td></tr>
+    <tr><td>Drag on the waveform</td><td>Select a rectangular block of cells, including empty cycles to the right. Copy/paste moves the whole block.</td></tr>
+    <tr><td>Middle click</td><td>Toggle insert mode at the clicked cell; the caret shows the insertion column.</td></tr>
+    <tr><td>Middle drag</td><td>Select several signal rows and insert the typed characters into all of them.</td></tr>
+    <tr><td>Type on a selection</td><td>Write a WaveDrom character to all selected cells (with auto-advance if enabled).</td></tr>
     <tr><td>Right-click</td><td>Context menu for labels, signals, groups and cells.</td></tr>
     <tr><td>Ctrl + mouse wheel</td><td>Zoom; Shift + wheel scrolls horizontally.</td></tr>
     <tr><td>Split view</td><td>Edit JSON and waveform simultaneously; valid JSON renders live and waveform edits update the JSON.</td></tr>

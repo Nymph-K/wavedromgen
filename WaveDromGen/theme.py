@@ -228,6 +228,33 @@ def build_stylesheet(theme: Theme) -> str:
         border-right: 1px solid {t.border.name()};
         padding: 6px 5px;
     }}
+    QToolBar#WavePalette {{
+        background: {t.surface.name()};
+        border-bottom: 1px solid {t.border.name()};
+        padding: 3px 8px;
+        spacing: 3px;
+    }}
+    QToolButton#PaletteButton {{
+        background: {t.surface.name()};
+        border: 1px solid {t.border.name()};
+        border-radius: 5px;
+        padding: 2px 3px;
+        min-height: 20px;
+        font-family: "Cascadia Mono", "Consolas", monospace;
+        font-weight: 600;
+    }}
+    QToolButton#PaletteButton:hover {{
+        background: {t.accent_soft.name()};
+        border-color: {t.accent.name()};
+    }}
+    QToolButton#PaletteButton:checked {{
+        background: {t.accent.name()};
+        border-color: {t.accent.name()};
+        color: #ffffff;
+    }}
+    QToolButton#PaletteButton:disabled {{
+        color: {t.muted.name()};
+    }}
     QToolBar::separator {{
         width: 1px;
         background: {t.border.name()};

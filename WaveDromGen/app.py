@@ -382,6 +382,15 @@ class MainWindow(QMainWindow):
         self.main_toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
         self.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
 
+        self.palette_bar = QToolBar("Wave Palette")
+        self.palette_bar.setObjectName("WavePalette")
+        self.palette_bar.setMovable(False)
+        self.palette_bar.setFloatable(False)
+        self.palette_bar.setContextMenuPolicy(Qt.PreventContextMenu)
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.addToolBar(Qt.TopToolBarArea, self.palette_bar)
+        self._populate_palette()
+
         status = self.statusBar()
         self.status_cursor = QLabel(self._tr("Ready", "就绪"))
         self.status_cursor.setObjectName("Muted")
@@ -425,6 +434,119 @@ class MainWindow(QMainWindow):
         tb.addWidget(spacer)
         for action_id in ("toggle_theme", "settings", "help"):
             tb.addAction(self.actions[action_id])
+
+    # ------------------------------------------------------------------
+    # Waveform palette
+    # ------------------------------------------------------------------
+    PALETTE_CHARS = "01x.z=2345pnudhl"
+
+    _WAVE_TOOLTIPS = {
+        "0": ("Low level", "低电平"),
+        "1": ("High level", "高电平"),
+        "x": ("Unknown / don't care", "未知态"),
+        ".": ("Continue the previous state", "保持前一个状态"),
+        "z": ("High impedance", "高阻态"),
+        "=": ("Data bus (consumes a data label)", "数据总线（占用一个 data 标签）"),
+        "2": ("Data bus, colour 2", "数据总线 颜色 2"),
+        "3": ("Data bus, colour 3", "数据总线 颜色 3"),
+        "4": ("Data bus, colour 4", "数据总线 颜色 4"),
+        "5": ("Data bus, colour 5", "数据总线 颜色 5"),
+        "p": ("Positive-edge clock", "上升沿时钟"),
+        "n": ("Negative-edge clock", "下降沿时钟"),
+        "u": ("Bus up transition", "总线上升沿过渡"),
+        "d": ("Bus down transition", "总线下降沿过渡"),
+        "h": ("High clock phase", "时钟高相位"),
+        "l": ("Low clock phase", "时钟低相位"),
+    }
+
+    def _palette_button(self, text: str, tooltip: str, callback, *, checkable: bool = False) -> QToolButton:
+        button = QToolButton(self.palette_bar)
+        button.setObjectName("PaletteButton")
+        button.setText(text)
+        button.setToolTip(tooltip)
+        button.setCheckable(checkable)
+        button.setFocusPolicy(Qt.NoFocus)
+        button.setCursor(Qt.PointingHandCursor)
+        if checkable:
+            button.setMinimumWidth(46)
+        elif len(text) == 1:
+            button.setFixedWidth(24)
+        else:
+            button.setMinimumWidth(38)
+        button.clicked.connect(lambda checked=False, fn=callback: fn())
+        self.palette_bar.addWidget(button)
+        return button
+
+    def _populate_palette(self) -> None:
+        bar = self.palette_bar
+        bar.clear()
+        self.palette_buttons: list[QToolButton] = []
+        self.palette_toggle = self._palette_button(
+            self._tr("INS", "插入"),
+            self._tr(
+                "Insert mode: typing pushes the rest of the lane right (middle mouse)",
+                "插入模式：输入波形时后续波形右移（鼠标中键切换）",
+            ),
+            self._on_palette_insert_clicked,
+            checkable=True,
+        )
+        self.palette_buttons.append(self.palette_toggle)
+        bar.addSeparator()
+        for char in self.PALETTE_CHARS:
+            en, zh = self._WAVE_TOOLTIPS.get(char, (char, char))
+            label = zh if self.language == "zh" else en
+            button = self._palette_button(
+                char,
+                f"{label}  —  {char}",
+                lambda c=char: self._apply_palette_char(c),
+            )
+            self.palette_buttons.append(button)
+        bar.addSeparator()
+        self.palette_buttons.append(
+            self._palette_button(
+                "<| cycle",
+                self._tr("Insert one cycle before the selection", "在选区前插入一个周期"),
+                lambda: self._insert_cycle(True),
+            )
+        )
+        self.palette_buttons.append(
+            self._palette_button(
+                "cycle |>",
+                self._tr("Insert one cycle after the selection", "在选区后插入一个周期"),
+                lambda: self._insert_cycle(False),
+            )
+        )
+        self.palette_buttons.append(
+            self._palette_button(
+                self._tr("Del", "删除"),
+                self._tr("Delete the selected cycles", "删除选中的波形周期"),
+                self._delete_cells,
+            )
+        )
+        self.palette_buttons.append(
+            self._palette_button(
+                "{}",
+                self._tr("Insert an empty {} row", "插入空行 {}"),
+                self._insert_spacer,
+            )
+        )
+        self.palette_toggle.blockSignals(True)
+        self.palette_toggle.setChecked(self.canvas.insert_mode if hasattr(self, "canvas") else False)
+        self.palette_toggle.blockSignals(False)
+
+    def _apply_palette_char(self, char: str) -> None:
+        if not self.doc.rows:
+            return
+        self.canvas.apply_char(char)
+        self.canvas.setFocus(Qt.OtherFocusReason)
+
+    def _on_palette_insert_clicked(self) -> None:
+        if not hasattr(self, "canvas"):
+            return
+        wanted = self.palette_toggle.isChecked()
+        if self.canvas.insert_mode != wanted:
+            self.canvas.set_insert_mode(wanted)
+        self.canvas.setFocus(Qt.OtherFocusReason)
 
     def _create_menus(self) -> None:
         menubar = self.menuBar()
@@ -1076,11 +1198,13 @@ class MainWindow(QMainWindow):
         selection = self.canvas.selection
         if selection is not None:
             sel = selection.normalized()
-            self.editor_panel.focus_wave(sel.row0, sel.col0, sel.col1)
+            self.editor_panel.focus_wave(
+                list(range(sel.row0, sel.row1 + 1)), sel.col0, sel.col1
+            )
             return
         rows = self.canvas.selected_rows()
         if rows:
-            self.editor_panel.focus_wave(min(rows), -1, -1)
+            self.editor_panel.focus_wave(rows, -1, -1)
 
     def _on_selection_changed(self) -> None:
         self._update_actions()
@@ -1104,6 +1228,10 @@ class MainWindow(QMainWindow):
         action = self.actions.get("toggle_insert_mode")
         if action is not None:
             action.setChecked(enabled)
+        if hasattr(self, "palette_toggle"):
+            self.palette_toggle.blockSignals(True)
+            self.palette_toggle.setChecked(enabled)
+            self.palette_toggle.blockSignals(False)
         if enabled:
             self._show_status(
                 self._tr(
@@ -1116,13 +1244,15 @@ class MainWindow(QMainWindow):
             self._update_status()
         self._update_actions()
 
-    def _on_wave_focus(self, row: int, start: int, end: int) -> None:
+    def _on_wave_focus(self, rows, start: int, end: int) -> None:
         """Follow the waveform selection in the JSON editor (requirement 4.7)."""
         if self._inline_editing or self._switching_tab or self._applying_json:
             return
         if self._view_mode == "wave" or not self.canvas.hasFocus():
             return
-        self.editor_panel.focus_wave(row, start, end)
+        if isinstance(rows, int):
+            rows = [rows]
+        self.editor_panel.focus_wave(rows, start, end)
 
     def _on_canvas_edit_state(self, editing: bool) -> None:
         self._inline_editing = editing
@@ -1602,9 +1732,18 @@ class MainWindow(QMainWindow):
         text = QApplication.clipboard().text()
         if not text.strip():
             return
-        count = self.canvas.apply_wave_text(text)
+        count = self.canvas.apply_wave_block(text)
         if count:
-            self._show_status(self._tr(f"Pasted into {count} cell(s)", f"已粘贴到 {count} 个单元格"))
+            rows = len([line for line in text.replace("\r\n", "\n").split("\n") if line])
+            if rows > 1:
+                self._show_status(
+                    self._tr(
+                        f"Pasted a {rows}-row waveform block",
+                        f"已粘贴 {rows} 行波形块",
+                    )
+                )
+            else:
+                self._show_status(self._tr(f"Pasted into {count} cell(s)", f"已粘贴到 {count} 个单元格"))
         else:
             self._show_status(self._tr("Clipboard is not a waveform string", "剪贴板不是波形字符串"))
 
@@ -2014,6 +2153,8 @@ class MainWindow(QMainWindow):
         self.editor_panel.set_language(self.language)
         self._create_menus()
         self._create_toolbar()
+        self._populate_palette()
+        self._update_actions()
         self._update_status()
         self._update_title()
         self.canvas.update()
@@ -2108,6 +2249,9 @@ class MainWindow(QMainWindow):
         self.actions["undo"].setEnabled(True)
         self.actions["redo"].setEnabled(True)
         self.actions["toggle_live"].setChecked(self.editor_panel.live_enabled)
+        palette_enabled = has_rows and not self._inline_editing
+        for button in getattr(self, "palette_buttons", []):
+            button.setEnabled(palette_enabled)
         self._sync_config_actions()
 
     # ------------------------------------------------------------------

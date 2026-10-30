@@ -144,7 +144,7 @@ class CodeEditor(QPlainTextEdit):
         self._search_selections: list = []
         self._current_line_selection = None
         self._error_selection = None
-        self._wave_selection = None
+        self._wave_selections: list = []
         self._wave_cursor = None
         self.line_number_area = LineNumberArea(self)
         self.setFrameShape(QPlainTextEdit.NoFrame)
@@ -271,8 +271,8 @@ class CodeEditor(QPlainTextEdit):
             error_sel.format = err_format
             self._error_selection = error_sel
             selections.append(error_sel)
-        if self._wave_selection is not None:
-            selections.append(self._wave_selection)
+        if self._wave_selections:
+            selections.extend(self._wave_selections)
         selections.extend(self._search_selections)
         self.setExtraSelections(selections)
 
@@ -291,46 +291,62 @@ class CodeEditor(QPlainTextEdit):
         return ranges
 
     def clear_wave_focus(self) -> None:
-        if self._wave_selection is None and self._wave_cursor is None:
+        if not self._wave_selections and self._wave_cursor is None:
             return
-        self._wave_selection = None
+        self._wave_selections = []
         self._wave_cursor = None
         self._on_cursor_moved()
 
-    def focus_wave_line(self, row_index: int, char_start: int = -1, char_end: int = -1) -> bool:
-        """Scroll to a lane's ``wave`` value and highlight the selected cycles."""
+    def focus_wave_rows(self, rows, char_start: int = -1, char_end: int = -1) -> bool:
+        """Scroll to one or more ``wave`` lines and highlight their cycles."""
         ranges = self.wave_value_ranges()
-        if row_index < 0 or row_index >= len(ranges):
+        if isinstance(rows, int):
+            rows = [rows]
+        valid = sorted({int(row) for row in rows if 0 <= int(row) < len(ranges)})
+        if not valid:
             self.clear_wave_focus()
             return False
-        value_start, value_end = ranges[row_index]
-        if char_start < 0 or char_end < 0:
-            start = value_start
-            end = value_end
-        else:
-            length = value_end - value_start
-            start = value_start + max(0, min(char_start, length))
-            end = value_start + max(0, min(char_end + 1, length))
-            if end <= start:
-                end = min(value_end, start + 1)
-        selection = QTextEditExtraSelection()
-        cursor = QTextCursor(self.document())
-        cursor.setPosition(start)
-        cursor.setPosition(end, QTextCursor.KeepAnchor)
-        selection.cursor = cursor
+        spans: list[tuple[int, int]] = []
+        for row_index in valid:
+            value_start, value_end = ranges[row_index]
+            if char_start < 0 or char_end < 0:
+                start, end = value_start, value_end
+            else:
+                length = value_end - value_start
+                start = value_start + max(0, min(char_start, length))
+                end = value_start + max(0, min(char_end + 1, length))
+                if end <= start:
+                    end = min(value_end, start + 1)
+            spans.append((start, end))
         fmt = QTextCharFormat()
         fmt.setBackground(QColor(self.theme.accent.red(), self.theme.accent.green(), self.theme.accent.blue(), 70))
         fmt.setUnderlineColor(self.theme.accent)
         fmt.setUnderlineStyle(QTextCharFormat.SingleUnderline)
-        selection.format = fmt
-        self._wave_selection = selection
+        selections = []
+        for start, end in spans:
+            selection = QTextEditExtraSelection()
+            cursor = QTextCursor(self.document())
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            selection.cursor = cursor
+            selection.format = fmt
+            selections.append(selection)
+        self._wave_selections = selections
+        # A real text selection from the first to the last lane makes a
+        # multi-row waveform selection visible in the editor as well.
         caret = QTextCursor(self.document())
-        caret.setPosition(start)
+        caret.setPosition(spans[0][0])
+        if len(spans) > 1:
+            caret.setPosition(spans[-1][1], QTextCursor.KeepAnchor)
         self._wave_cursor = caret
         self.setTextCursor(caret)
         self.centerCursor()
         self._on_cursor_moved()
         return True
+
+    def focus_wave_line(self, row_index: int, char_start: int = -1, char_end: int = -1) -> bool:
+        """Scroll to a lane's ``wave`` value and highlight the selected cycles."""
+        return self.focus_wave_rows([row_index], char_start, char_end)
 
     def _rebuild_search_selections(self) -> None:
         self._search_selections = []
@@ -1009,9 +1025,9 @@ class JsonPanel(QWidget):
     def focus_editor(self) -> None:
         self.editor.setFocus(Qt.OtherFocusReason)
 
-    def focus_wave(self, row_index: int, char_start: int = -1, char_end: int = -1) -> None:
-        """Jump to the lane's ``wave`` line without stealing focus."""
-        self.editor.focus_wave_line(row_index, char_start, char_end)
+    def focus_wave(self, rows, char_start: int = -1, char_end: int = -1) -> None:
+        """Jump to one or more lanes' ``wave`` lines without stealing focus."""
+        self.editor.focus_wave_rows(rows, char_start, char_end)
 
     def clear_wave_focus(self) -> None:
         self.editor.clear_wave_focus()

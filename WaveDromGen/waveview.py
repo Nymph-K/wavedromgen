@@ -96,7 +96,7 @@ class WaveCanvas(QWidget):
     toolChanged = Signal(str)
     editStateChanged = Signal(bool)
     insertModeChanged = Signal(bool)
-    waveFocusChanged = Signal(int, int, int)
+    waveFocusChanged = Signal(object, int, int)
     groupRenameRequested = Signal(int, int)
 
     TOOLS = ("select", "clk", "sig", "bus", "x", "z", "gap", "text", "clear", "node")
@@ -129,6 +129,7 @@ class WaveCanvas(QWidget):
         self._press_row: int | None = None
         self._drag = DragState()
         self._drag_started = False
+        self._middle_moved = False
         self._last_paint_cell: tuple[int, int] | None = None
         self._editor: InlineEditor | None = None
         self._editing_target: EditTarget | None = None
@@ -283,6 +284,7 @@ class WaveCanvas(QWidget):
             focused=self.hasFocus(),
             show_chrome=True,
             show_selection=True,
+            insert_mode=self.insert_mode,
         )
         self._renderer.paint(painter, self._layout, state)
         # A subtle card edge separates the diagram from the scroll background.
@@ -444,7 +446,7 @@ class WaveCanvas(QWidget):
         self.setFocus(Qt.MouseFocusReason)
         pos = event.position()
         if event.button() == Qt.MiddleButton:
-            self._toggle_insert_at(pos)
+            self._start_middle_gesture(pos)
             event.accept()
             return
         if event.button() == Qt.LeftButton:
@@ -519,18 +521,64 @@ class WaveCanvas(QWidget):
         self._emit_cursor_info()
 
     def _toggle_insert_at(self, pos: QPointF) -> None:
-        cell = self._cell_from_pos(pos)
-        if cell is None:
-            # Middle click in the gutter simply leaves insert mode.
+        row = self._layout.row_at(pos.y())
+        if row is None:
             self.set_insert_mode(False)
             return
-        if not self.insert_mode:
-            self.set_active_cell(cell[0], cell[1])
-            if cell[1] >= len(self.doc.rows[cell[0]].wave):
-                self._grow_view_for(cell[1])
-            self.set_insert_mode(True)
-        else:
+        if self.insert_mode:
             self.set_insert_mode(False)
+            return
+        cell = self._cell_from_pos(pos)
+        if cell is None:
+            col = self.active_cell[1] if self.active_cell else 0
+            row_index = row.index
+        else:
+            row_index, col = cell
+        self.set_insert_mode(False)
+        self.set_active_cell(row_index, col)
+        if col > len(self.doc.rows[row_index].wave):
+            self._grow_view_for(col)
+        self.set_insert_mode(True)
+
+    def _start_middle_gesture(self, pos: QPointF) -> None:
+        """Middle press: click toggles insert mode, drag selects rows/cells."""
+        row = self._layout.row_at(pos.y())
+        if row is None:
+            self.set_insert_mode(False)
+            return
+        self._press_pos = QPoint(int(pos.x()), int(pos.y()))
+        self._press_row = row.index
+        self._middle_moved = False
+        if pos.x() < self._layout.wave_origin:
+            # Dragging in the gutter selects signal rows.
+            if self._selected_rows:
+                self._selected_rows = sorted(set(self._selected_rows + [row.index]))
+            else:
+                self._selected_rows = [row.index]
+            self._row_anchor = row.index
+            self.selection = None
+            self._anchor = None
+            self.active_cell = (
+                row.index,
+                self.active_cell[1] if self.active_cell else 0,
+            )
+            self._mode = "middle-rows"
+            self.update()
+            self.selectionChanged.emit()
+            self._emit_cursor_info()
+            return
+        cell = self._cell_from_pos(pos)
+        if cell is None:
+            return
+        self._anchor = cell
+        self.active_cell = cell
+        self.selection = Selection(cell[0], cell[1], cell[0], cell[1])
+        self._selected_rows = []
+        self._row_anchor = None
+        self._mode = "middle-select"
+        self.update()
+        self.selectionChanged.emit()
+        self._emit_cursor_info()
 
     def set_active_cell(self, row: int, col: int) -> None:
         if not self.doc.rows:
@@ -569,6 +617,36 @@ class WaveCanvas(QWidget):
                 self._drag.target_index = self._layout.insertion_index(event.position().y())
                 self.update()
                 return
+        if self._mode in ("middle-select", "middle-rows"):
+            if self._press_pos is not None:
+                distance = (event.position() - QPointF(self._press_pos)).manhattanLength()
+                if distance > 4:
+                    self._middle_moved = True
+                    if not self.insert_mode:
+                        self.set_insert_mode(True)
+            if self._mode == "middle-rows":
+                row = self._layout.row_at(pos.y())
+                if self._middle_moved and row is not None:
+                    anchor = self._row_anchor if self._row_anchor is not None else row.index
+                    a, b = sorted((anchor, row.index))
+                    self._selected_rows = list(range(a, b + 1))
+                    col = self.active_cell[1] if self.active_cell else 0
+                    self.selection = Selection(a, col, b, col)
+                    self.active_cell = (b, col)
+                    self._emit_cursor_info()
+                    self.selectionChanged.emit()
+                    self.update()
+            elif cell is not None and self._anchor is not None and self._middle_moved:
+                self.selection = Selection(
+                    self._anchor[0], self._anchor[1], cell[0], cell[1]
+                ).normalized()
+                self.active_cell = cell
+                if cell[1] >= self._layout.display_units - 1:
+                    self._grow_view_for(cell[1])
+                self._ensure_cell_visible(cell[0], cell[1])
+                self._emit_cursor_info()
+                self.selectionChanged.emit()
+                self.update()
         if self._mode == "selecting" and cell is not None:
             if self._anchor is None:
                 self._anchor = cell
@@ -602,6 +680,20 @@ class WaveCanvas(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MiddleButton:
+            moved = self._middle_moved
+            self._mode = ""
+            self._press_pos = None
+            self._press_row = None
+            self._middle_moved = False
+            if moved:
+                self.set_insert_mode(True)
+            else:
+                self._toggle_insert_at(event.position())
+            self._update_cursor_shape()
+            self.update()
+            super().mouseReleaseEvent(event)
+            return
         if event.button() == Qt.LeftButton:
             if self._mode in ("row-press", "group-press") and self._drag_started and self._drag.active:
                 target = self._drag.target_index
@@ -743,31 +835,101 @@ class WaveCanvas(QWidget):
             return
         changed = self.doc.apply_wave_chars(cells, char, tag="wave")
         single = len(cells) == 1
-        if changed:
-            if single and self.auto_advance:
-                row, col = cells[0]
-                next_col = col + 1
-                row_len = len(self.doc.rows[row].wave) if row < len(self.doc.rows) else 0
-                if next_col < row_len:
-                    self.active_cell = (row, next_col)
-                    self.selection = Selection(row, next_col, row, next_col)
-                    self._anchor = (row, next_col)
+        advanced = False
+        if single and self.auto_advance:
+            # Advance after every typed waveform character, even when it
+            # matches the current cell, so repeated states can be entered fast.
+            row, col = cells[0]
+            next_col = min(col + 1, self._layout.max_column())
+            self.active_cell = (row, next_col)
+            self.selection = Selection(row, next_col, row, next_col)
+            self._anchor = (row, next_col)
+            advanced = True
+            self._grow_view_for(next_col)
+        if changed or advanced:
             self.refresh()
-            self.documentEdited.emit("wave")
+            if changed:
+                self.documentEdited.emit("wave")
         self._emit_cursor_info()
 
+    def _insert_targets(self) -> list[int]:
+        """Lanes that receive text in insert mode (multi-row selections too)."""
+        if self.selection is not None:
+            sel = self.selection.normalized()
+            rows = [
+                index
+                for index in range(sel.row0, sel.row1 + 1)
+                if 0 <= index < len(self.doc.rows)
+            ]
+            if rows:
+                return rows
+        if self._selected_rows:
+            return sorted(
+                index for index in self._selected_rows if 0 <= index < len(self.doc.rows)
+            )
+        if self.active_cell is not None and 0 <= self.active_cell[0] < len(self.doc.rows):
+            return [self.active_cell[0]]
+        return []
+
     def _insert_at_cursor(self, char: str) -> None:
-        if self.active_cell is None or not self.doc.rows:
+        rows = self._insert_targets()
+        if not rows:
             return
-        row, col = self.active_cell
-        row = max(0, min(row, len(self.doc.rows) - 1))
-        self.doc.insert_text(row, col, char)
+        if self.active_cell is None:
+            self.active_cell = (rows[0], 0)
+        _, col = self.active_cell
+        col = max(0, min(col, self._layout.max_column()))
+        self.doc.insert_text_rows(rows, col, char)
         next_col = col + 1
         self._grow_view_for(next_col)
-        self.set_active_cell(row, next_col)
+        self.active_cell = (rows[0], next_col)
+        self._anchor = (rows[0], next_col)
+        self.selection = Selection(rows[0], next_col, rows[-1], next_col)
+        self._selected_rows = []
         self.refresh()
         self.documentEdited.emit("insert")
-        self._ensure_cell_visible(row, next_col)
+        self._ensure_cell_visible(rows[0], next_col)
+
+    def apply_char(self, char: str) -> None:
+        """Apply a waveform character from the toolbar palette."""
+        value = sanitize_wave_char(char)
+        if value is None:
+            return
+        if not self.doc.rows:
+            return
+        self._type_wave_char(value)
+
+    def apply_wave_block(self, text: str) -> int:
+        """Paste a rectangular block of waveform characters."""
+        lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        while lines and not lines[-1]:
+            lines.pop()
+        if not lines:
+            return 0
+        selection = self.selection.normalized() if self.selection is not None else None
+        if selection is not None:
+            top, left = selection.row0, selection.col0
+        elif self.active_cell is not None:
+            top, left = self.active_cell
+        else:
+            return 0
+        if len(lines) == 1:
+            chars = "".join(
+                c for c in lines[0] if sanitize_wave_char(c) is not None
+            )
+            if not chars:
+                return 0
+            cells = self.selected_cells()
+            if len(cells) <= 1:
+                changed = self.doc.apply_wave_block(top, left, chars)
+            else:
+                changed = self.doc.apply_wave_sequence(cells, chars)
+        else:
+            changed = self.doc.apply_wave_block(top, left, "\n".join(lines))
+        if changed:
+            self.refresh()
+            self.documentEdited.emit("wave-paste")
+        return changed
 
     def _delete_at_cursor(self, *, previous: bool = False) -> None:
         """Delete the selected cycles (real deletion, not "." replacement)."""
@@ -1162,12 +1324,20 @@ class WaveCanvas(QWidget):
         elif self.tool != "select":
             parts.append(self.tool)
         self.cursorInfoChanged.emit("  ·  ".join(parts))
-        if self.hasFocus() and self.selection is not None and self.doc.rows:
+        if not self.hasFocus() or not self.doc.rows:
+            return
+        rows: list[int] = []
+        col0, col1 = -1, -1
+        if self.selection is not None:
             sel = self.selection.normalized()
-            self.waveFocusChanged.emit(sel.row0, sel.col0, sel.col1)
-        elif self.hasFocus() and self._selected_rows:
-            row = min(self._selected_rows)
-            self.waveFocusChanged.emit(row, -1, -1)
+            rows = list(range(sel.row0, sel.row1 + 1))
+            col0, col1 = sel.col0, sel.col1
+        elif self._selected_rows:
+            rows = sorted(self._selected_rows)
+        elif self.active_cell is not None:
+            rows = [self.active_cell[0]]
+        if rows:
+            self.waveFocusChanged.emit(rows, col0, col1)
 
 
 class WaveView(QScrollArea):

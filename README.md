@@ -1,6 +1,6 @@
 <p align="center"><img src="asset/md/logo.png" width="96" alt="WaveDromGen logo"></p>
 
-# WaveDromGen v2.1
+# WaveDromGen v2.2
 
 **A GUI digital timing-diagram editor with WaveDrom-compatible rendering, a live JSON editor and direct waveform manipulation.**
 
@@ -23,8 +23,9 @@ WaveDromGen lets you draw timing diagrams visually, edit the underlying WaveJSON
 | ⏱️ | **Adaptive clocks** — lanes whose names contain `clk` or `clock` follow the longest signal automatically, shrinking as well as growing. |
 | 🧩 | **Signal groups** — select signals and press <kbd>Ctrl</kbd>+<kbd>G</kbd> to wrap them in a named group; groups can be nested, selected by their bracket, copied, duplicated, moved and ungrouped as a unit. Empty `{}` rows are supported too. |
 | ➕ | **Signal editing** — add, insert, delete, duplicate, copy and paste signals or groups, all with configurable shortcuts. New signals match the clock length and <kbd>Ctrl</kbd>+<kbd>Enter</kbd> starts editing the new name. |
-| 🖱️ | **Range waveform editing** — drag-select any block of cells (including empty cycles right of the lane end) and type WaveDrom characters (`0 1 x z = u d p P n N l L h H 2..9 \| .`) to paint the whole block. |
-| ⏹️ | **Cycle delete / insert** — <kbd>Del</kbd> removes the selected cycles, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> inserts a cycle, and the middle mouse button toggles an insert mode for continuous typing. |
+| 🖱️ | **Range waveform editing** — drag-select any block of cells (including empty cycles right of the lane end) and type WaveDrom characters (`0 1 x z = u d p P n N l L h H 2..9 \| .`) to paint the whole block. Copy/paste moves the complete rectangular block. |
+| ⏹️ | **Cycle delete / insert** — <kbd>Del</kbd> removes the selected cycles, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> inserts a cycle, and the middle mouse button toggles an insert mode for continuous typing. A palette of common wave characters and cycle buttons sits above the canvas. |
+| 🎯 | **Insert caret & multi-lane insert** — insert mode highlights the target cycle with a vertical caret; middle-drag selects several lanes and typing inserts into all of them at once. |
 | 🎛️ | **Diagram settings** — a dialog for skin, `hscale`, head/foot text and `tick`/`tock`/`every`, plus quick `period`/`phase` editing. |
 | ⌨️ | **Configurable shortcuts** — 72 actions, keyboard capture, conflict detection, presets and saving in Preferences. |
 | 🎨 | **Polished UI** — light/dark themes (dark mode switches the waveform to the dark skin), English/中文 UI, zoom, time ruler, selection, context menus, recent files and a compact editor. |
@@ -70,8 +71,9 @@ executables are attached to the [releases](https://github.com/Nymph-K/wavedromge
 - **Document tabs** — one tab per open WaveJSON file; close with <kbd>Ctrl</kbd>+<kbd>W</kbd> and switch with <kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd>.
 - **Menu bar** — File, Edit, Signal, View, Tools, Help.
 - **Main toolbar** — file actions, undo/redo, signal operations, view modes, zoom, theme, settings.
+- **Wave palette** — one clickable button per common wave character, plus insert-cycle-left/right, delete-cycle, empty `{}` row and the `INS` insert-mode toggle.
 - **Tool rail** — Select, Clock, Signal, Bus, Unknown, High-Z, Gap, Text, Clear and Node tools.
-- **Wave canvas** — a time ruler, signal gutter with drag handles and group brackets, snap-to-cell selection and inline label editors.
+- **Wave canvas** — a time ruler, signal gutter with drag handles and group brackets, snap-to-cell selection, an insert caret and inline label editors.
 - **WaveJSON panel** — live editor with a `Live` badge, apply/format/wrap/copy buttons and an error banner.
 - **Status bar** — active cell, selection, insert mode, sync state, signal count and zoom.
 
@@ -118,7 +120,9 @@ Click a cell, drag to select a rectangle, or use <kbd>Shift</kbd>+arrows / <kbd>
 | `\|` | Gap marker |
 | `<`, `>` | Sub-cycle (sharp) transitions |
 
-When a single cell is selected, typing advances the cursor to the next cell (configurable). Use **Edit → Copy Cells** / **Paste Cells** for blocks of characters.
+When a single cell is selected, typing advances the cursor to the next cycle — including when the typed character is the same as the current cell. This is controlled by **Preferences → Behaviour → “After typing any waveform character, jump to the next cycle”**. Use **Edit → Copy Cells** / **Paste Cells** for rectangular blocks: a copied 3×2 block is pasted as a 3×2 block, and pasting a single line into one cell fills several cycles.
+
+The **wave palette** above the canvas writes any of the common characters (`0 1 x . z = 2 3 4 5 p n u d h l`) to the current selection with one click.
 
 ### Deleting and inserting cycles
 
@@ -128,9 +132,13 @@ When a single cell is selected, typing advances the cursor to the next cell (con
 | Clear selected cycles to `.` | <kbd>Shift</kbd>+<kbd>Del</kbd> |
 | Insert one cycle before the selection | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>←</kbd> |
 | Insert one cycle after the selection | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>→</kbd> |
-| Insert mode | middle mouse button |
+| Insert mode | middle mouse button / `INS` palette button |
 
-Insert mode is a continuous typing mode: the middle click places the cursor, every waveform character you type is inserted and the rest of the lane moves right, and <kbd>Esc</kbd> or another middle click leaves the mode. Insert/delete apply to every lane in the selection, so several signals can be edited in lock-step.
+Insert mode is a continuous typing mode: the middle click places the caret, every waveform character you type is inserted and the rest of the lane moves right, and <kbd>Esc</kbd> or another middle click leaves the mode. A highlighted column and an I-beam caret show the insertion point. Insert/delete apply to every lane in the selection, so several signals can be edited in lock-step.
+
+Drag with the middle mouse button in the gutter (or across the waveform) to select several lanes; insert mode turns on and typing inserts the character into all selected lanes at once. Multi-row waveform selections are mirrored in the JSON editor: the corresponding `wave` lines are highlighted and selected there as well.
+
+![Insert mode caret and the waveform palette](asset/md/v2_insert.png)
 
 ### Clocks
 
@@ -203,7 +211,7 @@ Use the **Node** tool to place a one-character node marker on a waveform cell, t
 
 ## WaveJSON compatibility
 
-WaveDromGen v2.1 preserves the WaveJSON fields it understands and unknown fields it does not. It supports:
+WaveDromGen v2.2 preserves the WaveJSON fields it understands and unknown fields it does not. It supports:
 
 - `signal` lanes with `name`, `wave`, `data` (string or array), `node`, `period`, `phase` and extra fields;
 - **named signal groups**, including nested groups, kept as arrays instead of being flattened;
@@ -251,7 +259,7 @@ The waveform renderer is a direct port of WaveDrom's brick and data-marker algor
 python -m unittest discover -s tests -v
 ```
 
-The suite covers the WaveDrom brick port, clock extension and shrinking, groups and nested groups, empty rows, JSON/JSON5 handling and round-trips, cell insert/delete, undo/redo, settings and shortcuts, plus offscreen GUI tests for inline editing and Enter/Tab navigation, drag/drop ordering, range painting (including empty cycles right of the lane end), signal and group clipboard operations, insert mode, tabs and cross-tab paste, dark-skin switching, live JSON, split views, save/reopen and PNG/SVG export.
+The suite covers the WaveDrom brick port, clock extension and shrinking, groups and nested groups, empty rows, JSON/JSON5 handling and round-trips, lane-scoped cell edits, rectangular block paste, undo/redo, settings and shortcuts, plus offscreen GUI tests for inline editing and Enter/Tab navigation, drag/drop ordering, range painting (including empty cycles right of the lane end), the wave palette, middle-drag multi-lane insert, the insert caret, signal and group clipboard operations, multi-row editor selection, tabs and cross-tab paste, dark-skin switching, live JSON, split views, save/reopen and PNG/SVG export.
 
 ---
 

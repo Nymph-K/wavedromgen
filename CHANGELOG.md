@@ -2,6 +2,45 @@
 
 All notable changes to WaveDromGen are documented here.
 
+## [2.2.0] — 2026-10-30
+
+Editing polish: a waveform palette, multi-lane insert mode and rectangular block
+edits, plus a round of fixes for the v2.1 editor.
+
+### Added
+
+- **Waveform palette** above the canvas with one button per common wave character
+  (`0 1 x . z = 2 3 4 5 p n u d h l`), insert-cycle-before/after, delete-cycle
+  and empty `{}` row buttons. Clicking a character writes it to the selection.
+- **Insert mode button** (`INS`) in the palette, in addition to the middle mouse
+  button and the configurable action.
+- **Insertion caret**: in insert mode a highlighted column and an I-beam caret
+  show exactly which cycle will be pushed right.
+- **Middle-button drag** selects several signal rows (in the gutter or across
+  the waveform) and toggles insert mode; typing then inserts the character into
+  every selected lane at once.
+- **Multi-row selections are mirrored in the JSON editor**: the corresponding
+  `wave` lines are highlighted and selected as a multi-line text selection.
+- **Rectangular block copy/paste** for waveform cells: a copied block is pasted
+  as a block (multiple rows and columns), and a single copied line pasted into
+  one cell fills several cycles.
+- Auto-advance is now switchable in **Preferences → Behaviour**: "jump to the
+  next cycle after typing any waveform character", including characters that do
+  not change the cell.
+
+### Fixed
+
+- Editing one lane no longer pads unrelated lanes (especially empty `{}` rows)
+  with `0.....`. Only the lanes that receive characters are extended.
+- Group names are no longer clipped by their bracket: labels get their own
+  column, are drawn in full, and the bracket no longer overlaps them.
+- Typing `.` into an empty cycle to the right of a lane now extends the lane
+  (previously only non-`.` characters registered a change).
+- Typing a character that equals the current cell no longer blocks
+  auto-advance.
+- Clearing cells (`Shift+Delete`) no longer creates cycles in empty lanes.
+- The insert-mode caret, palette state and status text stay in sync.
+
 ## [2.1.0] — 2026-10-28
 
 This release focuses on WaveDrom compatibility, signal groups, cycle-level
