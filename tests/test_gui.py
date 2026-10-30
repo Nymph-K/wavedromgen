@@ -842,7 +842,7 @@ class WaveEditingV22Tests(GuiTestBase):
         QTest.qWait(60)
         self.assertFalse(self.canvas.insert_mode)
 
-    def test_multi_row_selection_selects_editor_lines(self):
+    def test_multi_row_selection_highlights_only_wave_strings(self):
         self._load(
             {
                 "signal": [
@@ -857,11 +857,74 @@ class WaveEditingV22Tests(GuiTestBase):
         self.canvas._emit_cursor_info()
         QTest.qWait(80)
         editor = self.win.editor_panel.editor
-        cursor = editor.textCursor()
-        self.assertTrue(cursor.hasSelection())
-        selected = cursor.selectedText()
-        self.assertIn("x.==x...", selected)
-        self.assertIn("01......", selected)
+        # No broad text selection: only the wave strings are highlighted.
+        self.assertFalse(editor.textCursor().hasSelection())
+        text = editor.toPlainText()
+        highlighted = [
+            text[selection.cursor.selectionStart(): selection.cursor.selectionEnd()]
+            for selection in editor._wave_selections
+        ]
+        self.assertEqual(highlighted, ["x.==x...", "01......"])
+
+    def test_palette_groups_and_group_buttons(self):
+        self._load(
+            {
+                "signal": [
+                    {"name": "a", "wave": "01.."},
+                    {"name": "b", "wave": "10.."},
+                ]
+            }
+        )
+        texts = [button.text() for button in self.win.palette_buttons]
+        for char in ("0", "1", "x", "z", ".", "=", "2", "9", "u", "d", "p", "P", "N", "L", "|", "<", ">"):
+            self.assertIn(char, texts)
+        classes = {button.text(): button.property("paletteClass") for button in self.win.palette_buttons}
+        self.assertEqual(classes["0"], "level")
+        self.assertEqual(classes["="], "bus")
+        self.assertEqual(classes["p"], "clock")
+        self.assertEqual(classes["|"], "special")
+        self.assertIn(self.win.palette_group_button.text(), ("Group", "分组"))
+        self.assertIn(self.win.palette_ungroup_button.text(), ("Ungroup", "取消分组"))
+        self.assertTrue(self.win.palette_group_button.isEnabled())
+        # Group two signals through the model, then use the ungroup button.
+        self.win._select_rows([0, 1])
+        self.win.doc.group_rows([0, 1], "G")
+        self.win._after_model_edit(selection=[0, 1])
+        self.canvas.set_row_selection([0, 1])
+        self.win._update_actions()
+        self.assertTrue(self.win.palette_ungroup_button.isEnabled())
+        self.win.palette_ungroup_button.click()
+        QTest.qWait(80)
+        self.assertFalse(isinstance(self.win.doc.dump_dict()["signal"][0], list))
+
+    def test_contextual_ctrl_c_and_ctrl_v(self):
+        self._load(
+            {
+                "signal": [
+                    {"name": "a", "wave": "012345"},
+                    {"name": "b", "wave": "012345"},
+                ]
+            }
+        )
+        self.canvas.selection = Selection(0, 1, 1, 3)
+        self._focus_canvas()
+        QTest.keyClick(self.canvas, Qt.Key_C, Qt.ControlModifier)
+        QTest.qWait(60)
+        self.assertEqual(QApplication.clipboard().text(), "123\n123")
+        self.canvas.selection = Selection(0, 4, 1, 4)
+        self.canvas.active_cell = (0, 4)
+        QTest.keyClick(self.canvas, Qt.Key_V, Qt.ControlModifier)
+        QTest.qWait(80)
+        self.assertEqual([row.wave for row in self.win.doc.rows], ["0123123", "0123123"])
+        # With a signal-row selection, Ctrl+C/Ctrl+V work on WaveJSON signals.
+        self._click_row_gutter(0)
+        QTest.keyClick(self.canvas, Qt.Key_C, Qt.ControlModifier)
+        QTest.qWait(60)
+        self.assertIn('"signal"', QApplication.clipboard().text())
+        before = len(self.win.doc.rows)
+        QTest.keyClick(self.canvas, Qt.Key_V, Qt.ControlModifier)
+        QTest.qWait(100)
+        self.assertEqual(len(self.win.doc.rows), before + 1)
 
     def test_rectangular_block_copy_and_paste(self):
         self._load(
@@ -885,6 +948,39 @@ class WaveEditingV22Tests(GuiTestBase):
         self.win._paste_cells()
         QTest.qWait(80)
         self.assertEqual(self.win.doc.rows[0].wave, "9923123")
+
+    def test_chinese_dialog_options(self):
+        from PySide6.QtWidgets import QCheckBox, QLabel
+
+        from WaveDromGen.dialogs import DiagramSettingsDialog, RowPropertiesDialog, SettingsDialog
+
+        settings_dialog = SettingsDialog(
+            self.win,
+            settings=self.win.settings,
+            registry=self.win.registry,
+            shortcut_map=self.win.shortcut_map,
+            language="zh",
+        )
+        texts = [label.text() for label in settings_dialog.findChildren(QLabel)]
+        texts.extend(box.text() for box in settings_dialog.findChildren(QCheckBox))
+        joined = " ".join(texts)
+        self.assertIn("自动将 clk", joined)
+        self.assertIn("输入任意波形字符", joined)
+        self.assertIn("字号", joined)
+        settings_dialog.deleteLater()
+
+        diagram_dialog = DiagramSettingsDialog(self.win, self.win.doc, language="zh")
+        diagram_texts = " ".join(label.text() for label in diagram_dialog.findChildren(QLabel))
+        self.assertIn("皮肤", diagram_texts)
+        self.assertIn("水平比例", diagram_texts)
+        self.assertIn("Tick 标签", diagram_texts)
+        diagram_dialog.deleteLater()
+
+        row_dialog = RowPropertiesDialog(self.win, self.win.doc.rows[0], language="zh")
+        row_texts = " ".join(label.text() for label in row_dialog.findChildren(QLabel))
+        self.assertIn("名称", row_texts)
+        self.assertIn("波形", row_texts)
+        row_dialog.deleteLater()
 
 
 if __name__ == "__main__":

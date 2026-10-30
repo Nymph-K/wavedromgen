@@ -438,7 +438,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Waveform palette
     # ------------------------------------------------------------------
-    PALETTE_CHARS = "01x.z=2345pnudhl"
+    PALETTE_GROUPS = (
+        ("level", ("0", "1", "x", "z", ".")),
+        ("bus", ("=", "2", "3", "4", "5", "6", "7", "8", "9", "u", "d")),
+        ("clock", ("p", "n", "P", "N", "h", "l", "H", "L")),
+        ("special", ("|", "<", ">")),
+    )
 
     _WAVE_TOOLTIPS = {
         "0": ("Low level", "低电平"),
@@ -451,15 +456,35 @@ class MainWindow(QMainWindow):
         "3": ("Data bus, colour 3", "数据总线 颜色 3"),
         "4": ("Data bus, colour 4", "数据总线 颜色 4"),
         "5": ("Data bus, colour 5", "数据总线 颜色 5"),
+        "6": ("Data bus, colour 6", "数据总线 颜色 6"),
+        "7": ("Data bus, colour 7", "数据总线 颜色 7"),
+        "8": ("Data bus, colour 8", "数据总线 颜色 8"),
+        "9": ("Data bus, colour 9", "数据总线 颜色 9"),
         "p": ("Positive-edge clock", "上升沿时钟"),
+        "P": ("Positive-edge clock with an edge marker", "带边沿标记的上升沿时钟"),
         "n": ("Negative-edge clock", "下降沿时钟"),
+        "N": ("Negative-edge clock with an edge marker", "带边沿标记的下降沿时钟"),
+        "h": ("High clock phase", "时钟高相位"),
+        "H": ("High clock phase with an edge marker", "带边沿标记的时钟高相位"),
+        "l": ("Low clock phase", "时钟低相位"),
+        "L": ("Low clock phase with an edge marker", "带边沿标记的时钟低相位"),
         "u": ("Bus up transition", "总线上升沿过渡"),
         "d": ("Bus down transition", "总线下降沿过渡"),
-        "h": ("High clock phase", "时钟高相位"),
-        "l": ("Low clock phase", "时钟低相位"),
+        "|": ("Waveform gap marker", "波形间隔标记"),
+        "<": ("Start a sub-cycle (sharp) transition", "开始子周期（尖锐跳变）"),
+        ">": ("End a sub-cycle (sharp) transition", "结束子周期（尖锐跳变）"),
     }
 
-    def _palette_button(self, text: str, tooltip: str, callback, *, checkable: bool = False) -> QToolButton:
+    def _palette_button(
+        self,
+        text: str,
+        tooltip: str,
+        callback,
+        *,
+        checkable: bool = False,
+        category: str = "action",
+        width: int | None = None,
+    ) -> QToolButton:
         button = QToolButton(self.palette_bar)
         button.setObjectName("PaletteButton")
         button.setText(text)
@@ -467,20 +492,72 @@ class MainWindow(QMainWindow):
         button.setCheckable(checkable)
         button.setFocusPolicy(Qt.NoFocus)
         button.setCursor(Qt.PointingHandCursor)
-        if checkable:
-            button.setMinimumWidth(46)
+        button.setProperty("paletteClass", category)
+        if width is not None:
+            button.setMinimumWidth(width)
+        elif checkable:
+            button.setMinimumWidth(42)
         elif len(text) == 1:
-            button.setFixedWidth(24)
+            button.setFixedWidth(26)
         else:
-            button.setMinimumWidth(38)
+            button.setMinimumWidth(44)
         button.clicked.connect(lambda checked=False, fn=callback: fn())
         self.palette_bar.addWidget(button)
+        # The dynamic property must be known before the stylesheet is polished.
+        button.style().unpolish(button)
+        button.style().polish(button)
         return button
 
     def _populate_palette(self) -> None:
         bar = self.palette_bar
+        old_widgets = list(getattr(self, "palette_buttons", []))
+        old_label = getattr(self, "palette_label", None)
+        if old_label is not None:
+            old_widgets.append(old_label)
         bar.clear()
-        self.palette_buttons: list[QToolButton] = []
+        for widget in old_widgets:
+            widget.setParent(None)
+            widget.deleteLater()
+        self.palette_buttons = []
+        label = QLabel(self._tr("Draw", "绘制"))
+        label.setObjectName("PaletteLabel")
+        self.palette_label = label
+        bar.addWidget(label)
+        for index, (category, chars) in enumerate(self.PALETTE_GROUPS):
+            if index:
+                bar.addSeparator()
+            for char in chars:
+                en, zh = self._WAVE_TOOLTIPS.get(char, (char, char))
+                tooltip = zh if self.language == "zh" else en
+                button = self._palette_button(
+                    char,
+                    f"{tooltip}  —  {char}",
+                    lambda c=char: self._apply_palette_char(c),
+                    category=category,
+                )
+                self.palette_buttons.append(button)
+        bar.addSeparator()
+        self.palette_group_button = self._palette_button(
+            self._tr("Group", "分组"),
+            self._tr(
+                "Wrap the selected signals in a named group (Ctrl+G)",
+                "将选中信号建立为命名分组（Ctrl+G）",
+            ),
+            self._group_selection,
+            width=50,
+        )
+        self.palette_ungroup_button = self._palette_button(
+            self._tr("Ungroup", "取消分组"),
+            self._tr(
+                "Dissolve the selected group (Ctrl+Shift+G)",
+                "取消选中的分组（Ctrl+Shift+G）",
+            ),
+            self._ungroup_selection,
+            width=70,
+        )
+        self.palette_buttons.append(self.palette_group_button)
+        self.palette_buttons.append(self.palette_ungroup_button)
+        bar.addSeparator()
         self.palette_toggle = self._palette_button(
             self._tr("INS", "插入"),
             self._tr(
@@ -489,24 +566,15 @@ class MainWindow(QMainWindow):
             ),
             self._on_palette_insert_clicked,
             checkable=True,
+            width=40,
         )
         self.palette_buttons.append(self.palette_toggle)
-        bar.addSeparator()
-        for char in self.PALETTE_CHARS:
-            en, zh = self._WAVE_TOOLTIPS.get(char, (char, char))
-            label = zh if self.language == "zh" else en
-            button = self._palette_button(
-                char,
-                f"{label}  —  {char}",
-                lambda c=char: self._apply_palette_char(c),
-            )
-            self.palette_buttons.append(button)
-        bar.addSeparator()
         self.palette_buttons.append(
             self._palette_button(
                 "<| cycle",
                 self._tr("Insert one cycle before the selection", "在选区前插入一个周期"),
                 lambda: self._insert_cycle(True),
+                width=58,
             )
         )
         self.palette_buttons.append(
@@ -514,6 +582,7 @@ class MainWindow(QMainWindow):
                 "cycle |>",
                 self._tr("Insert one cycle after the selection", "在选区后插入一个周期"),
                 lambda: self._insert_cycle(False),
+                width=58,
             )
         )
         self.palette_buttons.append(
@@ -521,6 +590,7 @@ class MainWindow(QMainWindow):
                 self._tr("Del", "删除"),
                 self._tr("Delete the selected cycles", "删除选中的波形周期"),
                 self._delete_cells,
+                width=34,
             )
         )
         self.palette_buttons.append(
@@ -528,6 +598,7 @@ class MainWindow(QMainWindow):
                 "{}",
                 self._tr("Insert an empty {} row", "插入空行 {}"),
                 self._insert_spacer,
+                width=30,
             )
         )
         self.palette_toggle.blockSignals(True)
@@ -1359,9 +1430,9 @@ class MainWindow(QMainWindow):
             "prev_tab": self.previous_tab,
             "close_tab": self.close_current_tab,
             "row_duplicate": self._duplicate_rows,
-            "row_copy": self._copy_rows,
+            "row_copy": self._copy_selection,
             "row_cut": self._cut_rows,
-            "row_paste": self._paste_rows,
+            "row_paste": self._paste_selection,
             "row_delete": self._delete_rows,
             "row_move_up": lambda: self._move_rows(-1),
             "row_move_down": lambda: self._move_rows(1),
@@ -1547,6 +1618,38 @@ class MainWindow(QMainWindow):
             self._update_title()
             self._update_actions()
             self._update_status()
+
+    # ------------------------------------------------------------------
+    # Context-sensitive clipboard (Ctrl+C / Ctrl+V)
+    # ------------------------------------------------------------------
+    def _has_cell_selection(self) -> bool:
+        """True when the canvas has a waveform-cell selection.
+
+        A row selection (left gutter, group bracket, middle-row drag) always
+        wins: it copies signals/groups rather than a column of cells.
+        """
+        return bool(
+            self.canvas.selection is not None
+            and not self.canvas.row_selection_rows
+            and self.canvas.selected_cells()
+        )
+
+    def _copy_selection(self) -> None:
+        """Ctrl+C: copy waveform cells or whole signal rows, by context."""
+        if self._has_cell_selection():
+            self._copy_cells()
+        else:
+            self._copy_rows()
+
+    def _paste_selection(self) -> None:
+        """Ctrl+V: paste a waveform block or WaveJSON signals, by context."""
+        if self._has_cell_selection():
+            text = QApplication.clipboard().text()
+            stripped = text.lstrip()
+            if stripped and not stripped.startswith(("{", "[")):
+                self._paste_cells()
+                return
+        self._paste_rows()
 
     def _copy_rows(self) -> None:
         rows = self._selected_rows()
@@ -2252,6 +2355,11 @@ class MainWindow(QMainWindow):
         palette_enabled = has_rows and not self._inline_editing
         for button in getattr(self, "palette_buttons", []):
             button.setEnabled(palette_enabled)
+        if hasattr(self, "palette_group_button"):
+            self.palette_group_button.setEnabled(palette_enabled)
+            self.palette_ungroup_button.setEnabled(
+                palette_enabled and self.canvas.selected_group_span() is not None
+            )
         self._sync_config_actions()
 
     # ------------------------------------------------------------------

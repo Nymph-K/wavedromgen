@@ -319,9 +319,9 @@ class CodeEditor(QPlainTextEdit):
                     end = min(value_end, start + 1)
             spans.append((start, end))
         fmt = QTextCharFormat()
-        fmt.setBackground(QColor(self.theme.accent.red(), self.theme.accent.green(), self.theme.accent.blue(), 70))
-        fmt.setUnderlineColor(self.theme.accent)
-        fmt.setUnderlineStyle(QTextCharFormat.SingleUnderline)
+        # Use the selection colour so the highlighted wave strings look selected
+        # while leaving the rest of the JSON text untouched.
+        fmt.setBackground(QColor(self.theme.selection))
         selections = []
         for start, end in spans:
             selection = QTextEditExtraSelection()
@@ -332,12 +332,11 @@ class CodeEditor(QPlainTextEdit):
             selection.format = fmt
             selections.append(selection)
         self._wave_selections = selections
-        # A real text selection from the first to the last lane makes a
-        # multi-row waveform selection visible in the editor as well.
+        # Only a collapsed caret is placed in the document; the wave strings
+        # themselves are highlighted by the extra selections above, so no
+        # unrelated JSON text is selected.
         caret = QTextCursor(self.document())
         caret.setPosition(spans[0][0])
-        if len(spans) > 1:
-            caret.setPosition(spans[-1][1], QTextCursor.KeepAnchor)
         self._wave_cursor = caret
         self.setTextCursor(caret)
         self.centerCursor()

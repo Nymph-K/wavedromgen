@@ -172,6 +172,35 @@ def build_palette(theme: Theme) -> QPalette:
 
 def build_stylesheet(theme: Theme) -> str:
     t = theme
+    if t.dark:
+        palette_colors = {
+            "level": ("#21252b", "#3b414b", "#e5e7eb", "#2b3038"),
+            "bus": ("#123a34", "#2f7f6d", "#8fe0c9", "#17473f"),
+            "clock": ("#23263f", "#505aa8", "#c7d2fe", "#2b3050"),
+            "special": ("#3a2a17", "#9a6a2f", "#f3c98b", "#46331c"),
+        }
+    else:
+        palette_colors = {
+            "level": ("#ffffff", "#d5d9e0", "#1f2937", "#f3f6fa"),
+            "bus": ("#e6f6f0", "#9ed4c3", "#0f766e", "#d5efe7"),
+            "clock": ("#eef1ff", "#b9c2f0", "#3f3fa8", "#e2e7ff"),
+            "special": ("#fff2df", "#f0c48a", "#b45309", "#ffe8c7"),
+        }
+    palette_rules: list[str] = []
+    for name, (bg, border, fg, hover) in palette_colors.items():
+        palette_rules.append(
+            f'    QToolButton#PaletteButton[paletteClass="{name}"] {{'
+            f" background: {bg}; border-color: {border}; color: {fg}; }}"
+        )
+        palette_rules.append(
+            f'    QToolButton#PaletteButton[paletteClass="{name}"]:hover {{'
+            f" background: {hover}; border-color: {t.accent.name()}; }}"
+        )
+        palette_rules.append(
+            f'    QToolButton#PaletteButton[paletteClass="{name}"]:disabled {{'
+            f" background: {bg}; color: {t.muted.name()}; }}"
+        )
+    palette_qss = "\n".join(palette_rules)
     return f"""
     * {{
         outline: none;
@@ -254,6 +283,12 @@ def build_stylesheet(theme: Theme) -> str:
     }}
     QToolButton#PaletteButton:disabled {{
         color: {t.muted.name()};
+    }}
+{palette_qss}
+    QLabel#PaletteLabel {{
+        color: {t.muted.name()};
+        padding: 0 7px 0 2px;
+        font-size: 9pt;
     }}
     QToolBar::separator {{
         width: 1px;

@@ -136,6 +136,10 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    def t(self, en: str, zh: str) -> str:
+        return zh if self.language == "zh" else en
+
     def _general_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -147,31 +151,51 @@ class SettingsDialog(QDialog):
         self.language_combo.addItem("English", "en")
         self.language_combo.addItem("中文", "zh")
         self.language_combo.setCurrentIndex(0 if self.language != "zh" else 1)
-        form.addRow("Language / 语言", self.language_combo)
+        form.addRow(self.t("Language / 语言", "语言 / Language"), self.language_combo)
         self.theme_combo = QComboBox()
-        self.theme_combo.addItem("Light", "light")
-        self.theme_combo.addItem("Dark", "dark")
-        self.theme_combo.addItem("Follow system", "auto")
+        self.theme_combo.addItem(self.t("Light", "浅色"), "light")
+        self.theme_combo.addItem(self.t("Dark", "深色"), "dark")
+        self.theme_combo.addItem(self.t("Follow system", "跟随系统"), "auto")
         theme = self.settings.get("theme", "light")
         index = max(0, self.theme_combo.findData(theme))
         self.theme_combo.setCurrentIndex(index)
-        form.addRow("Theme", self.theme_combo)
+        form.addRow(self.t("Theme", "主题"), self.theme_combo)
         layout.addLayout(form)
 
-        behaviour = QGroupBox("Behaviour")
+        behaviour = QGroupBox(self.t("Behaviour", "行为"))
         blayout = QVBoxLayout(behaviour)
-        self.auto_clocks = QCheckBox("Automatically extend clk/clock lanes to the longest signal")
+        self.auto_clocks = QCheckBox(
+            self.t(
+                "Automatically extend clk/clock lanes to the longest signal",
+                "自动将 clk/clock 信号扩展到最长信号的长度",
+            )
+        )
         self.auto_clocks.setChecked(bool(self.settings.get("auto_extend_clocks", True)))
         self.auto_advance = QCheckBox(
-            "After typing any waveform character, jump to the next cycle "
-            "(even when the character is unchanged)"
+            self.t(
+                "After typing any waveform character, jump to the next cycle "
+                "(even when the character is unchanged)",
+                "输入任意波形字符后自动跳到下一周期（即使字符与当前格相同）",
+            )
         )
         self.auto_advance.setChecked(bool(self.settings.get("auto_advance_cell", True)))
-        self.live_sync = QCheckBox("Apply valid JSON to the waveform while typing")
+        self.live_sync = QCheckBox(
+            self.t(
+                "Apply valid JSON to the waveform while typing",
+                "输入 JSON 时实时应用到波形",
+            )
+        )
         self.live_sync.setChecked(bool(self.settings.get("live_json_sync", True)))
-        self.link_skin = QCheckBox("Use the dark WaveDrom skin when the dark theme is active")
+        self.link_skin = QCheckBox(
+            self.t(
+                "Use the dark WaveDrom skin when the dark theme is active",
+                "深色主题下自动使用 dark 波形皮肤",
+            )
+        )
         self.link_skin.setChecked(bool(self.settings.get("link_wave_skin_to_theme", True)))
-        self.show_help = QCheckBox("Show quick help on startup")
+        self.show_help = QCheckBox(
+            self.t("Show quick help on startup", "启动时显示快速帮助")
+        )
         self.show_help.setChecked(bool(self.settings.get("show_shortcut_help_on_start", False)))
         blayout.addWidget(self.auto_clocks)
         blayout.addWidget(self.auto_advance)
@@ -180,24 +204,24 @@ class SettingsDialog(QDialog):
         blayout.addWidget(self.show_help)
         layout.addWidget(behaviour)
 
-        editor_box = QGroupBox("Editor")
+        editor_box = QGroupBox(self.t("Editor", "编辑器"))
         eform = QFormLayout(editor_box)
-        self.editor_wrap = QCheckBox("Word wrap")
+        self.editor_wrap = QCheckBox(self.t("Word wrap", "自动换行"))
         self.editor_wrap.setChecked(bool(self.settings.get("editor_wrap", False)))
         eform.addRow(self.editor_wrap)
         self.font_size = QDoubleSpinBox()
         self.font_size.setRange(8.0, 20.0)
         self.font_size.setSingleStep(0.5)
         self.font_size.setValue(float(self.settings.get("editor_font_size", 10.5)))
-        eform.addRow("Font size", self.font_size)
+        eform.addRow(self.t("Font size", "字号"), self.font_size)
         self.indent = QSpinBox()
         self.indent.setRange(1, 8)
         self.indent.setValue(int(self.settings.get("editor_indent", 2)))
-        eform.addRow("Indent spaces", self.indent)
+        eform.addRow(self.t("Indent spaces", "缩进空格"), self.indent)
         self.json_indent = QSpinBox()
         self.json_indent.setRange(0, 8)
         self.json_indent.setValue(int(self.settings.get("json_indent", 2)))
-        eform.addRow("JSON output indent", self.json_indent)
+        eform.addRow(self.t("JSON output indent", "JSON 输出缩进"), self.json_indent)
         layout.addWidget(editor_box)
         layout.addStretch(1)
         return page
@@ -208,10 +232,10 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         top = QHBoxLayout()
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search actions…")
+        self.search.setPlaceholderText(self.t("Search actions…", "搜索操作…"))
         self.search.setClearButtonEnabled(True)
         self.category = QComboBox()
-        self.category.addItem("All categories", "")
+        self.category.addItem(self.t("All categories", "全部分类"), "")
         for category in CATEGORY_ORDER:
             self.category.addItem(CATEGORY_ZH.get(category, category) if self.language == "zh" else category, category)
         top.addWidget(self.search, 1)
@@ -233,11 +257,18 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.table, 1)
 
         editor_row = QHBoxLayout()
-        editor_row.addWidget(QLabel("Shortcut"))
+        editor_row.addWidget(QLabel(self.t("Shortcut", "快捷键")))
         self.shortcut_edit = ShortcutEdit()
+        self.shortcut_edit.setPlaceholderText(self.t("Press a shortcut…", "按下快捷键…"))
+        self.shortcut_edit.setToolTip(
+            self.t(
+                "Press a key combination. Backspace removes the last one, Delete clears.",
+                "按下组合键。Backspace 删除最后一个，Delete 清空。",
+            )
+        )
         self.shortcut_edit.sequencesChanged.connect(self._on_shortcut_edited)
         editor_row.addWidget(self.shortcut_edit, 1)
-        self.reset_one = QPushButton("Reset")
+        self.reset_one = QPushButton(self.t("Reset", "恢复"))
         self.reset_one.clicked.connect(self._reset_selected)
         editor_row.addWidget(self.reset_one)
         layout.addLayout(editor_row)
@@ -447,13 +478,16 @@ class RowPropertiesDialog(QDialog):
             if language != "zh"
             else "以时间槽为单位的水平偏移（0.5 表示半个周期）"
         )
-        timing_form.addRow("Period", self.period)
-        timing_form.addRow("Phase", self.phase)
+        timing_form.addRow("Period" if language != "zh" else "周期", self.period)
+        timing_form.addRow("Phase" if language != "zh" else "相位", self.phase)
 
-        form.addRow("Name", self.name)
-        form.addRow("Wave", self.wave)
-        form.addRow("Data labels (one per line)", self.data)
-        form.addRow("Node annotations", self.node)
+        form.addRow("Name" if language != "zh" else "名称", self.name)
+        form.addRow("Wave" if language != "zh" else "波形", self.wave)
+        form.addRow(
+            "Data labels (one per line)" if language != "zh" else "数据标签（每行一个）",
+            self.data,
+        )
+        form.addRow("Node annotations" if language != "zh" else "节点标记", self.node)
         layout.addLayout(form)
         layout.addWidget(timing)
         note = QLabel(
@@ -497,7 +531,10 @@ class DiagramSettingsDialog(QDialog):
         self.resize(560, 620)
         layout = QVBoxLayout(self)
 
-        config_box = QGroupBox("Diagram" if language != "zh" else "波形图")
+        def t(en: str, zh: str) -> str:
+            return zh if language == "zh" else en
+
+        config_box = QGroupBox(t("Diagram", "波形图"))
         config_form = QFormLayout(config_box)
         self.skin = QComboBox()
         from .skins import available_skins
@@ -509,43 +546,43 @@ class DiagramSettingsDialog(QDialog):
         self.hscale = QSpinBox()
         self.hscale.setRange(1, 20)
         self.hscale.setValue(max(1, int(doc.hscale())))
-        self.hscale.setToolTip("Horizontal scale of the diagram")
-        config_form.addRow("Skin", self.skin)
-        config_form.addRow("Horizontal scale (hscale)", self.hscale)
+        self.hscale.setToolTip(t("Horizontal scale of the diagram", "波形图的水平比例"))
+        config_form.addRow(t("Skin", "皮肤"), self.skin)
+        config_form.addRow(t("Horizontal scale (hscale)", "水平比例 (hscale)"), self.hscale)
         layout.addWidget(config_box)
 
         head = doc.head
         foot = doc.foot
-        head_box = QGroupBox("Head (above the diagram)" if language != "zh" else "头部（波形上方）")
+        head_box = QGroupBox(t("Head (above the diagram)", "头部（波形上方）"))
         head_form = QFormLayout(head_box)
         self.head_text = QLineEdit(_text_value(head.get("text")))
         self.head_tick = QLineEdit(_tick_text(head.get("tick")))
         self.head_tock = QLineEdit(_tick_text(head.get("tock")))
-        self.head_tick.setPlaceholderText("0 or 1 2 3")
-        self.head_tock.setPlaceholderText("0.5 or 1 2 3")
+        self.head_tick.setPlaceholderText(t("0 or 1 2 3", "0 或 1 2 3"))
+        self.head_tock.setPlaceholderText(t("0.5 or 1 2 3", "0.5 或 1 2 3"))
         self.head_every = QSpinBox()
         self.head_every.setRange(1, 99)
         self.head_every.setValue(_every_value(head))
-        head_form.addRow("Text", self.head_text)
-        head_form.addRow("Tick labels", self.head_tick)
-        head_form.addRow("Tock labels", self.head_tock)
-        head_form.addRow("Every N cycles", self.head_every)
+        head_form.addRow(t("Text", "文本"), self.head_text)
+        head_form.addRow(t("Tick labels", "Tick 标签"), self.head_tick)
+        head_form.addRow(t("Tock labels", "Tock 标签"), self.head_tock)
+        head_form.addRow(t("Every N cycles", "每 N 个周期"), self.head_every)
         layout.addWidget(head_box)
 
-        foot_box = QGroupBox("Foot (below the diagram)" if language != "zh" else "尾部（波形下方）")
+        foot_box = QGroupBox(t("Foot (below the diagram)", "尾部（波形下方）"))
         foot_form = QFormLayout(foot_box)
         self.foot_text = QLineEdit(_text_value(foot.get("text")))
         self.foot_tick = QLineEdit(_tick_text(foot.get("tick")))
         self.foot_tock = QLineEdit(_tick_text(foot.get("tock")))
-        self.foot_tick.setPlaceholderText("0 or 1 2 3")
-        self.foot_tock.setPlaceholderText("0.5 or 1 2 3")
+        self.foot_tick.setPlaceholderText(t("0 or 1 2 3", "0 或 1 2 3"))
+        self.foot_tock.setPlaceholderText(t("0.5 or 1 2 3", "0.5 或 1 2 3"))
         self.foot_every = QSpinBox()
         self.foot_every.setRange(1, 99)
         self.foot_every.setValue(_every_value(foot))
-        foot_form.addRow("Text", self.foot_text)
-        foot_form.addRow("Tick labels", self.foot_tick)
-        foot_form.addRow("Tock labels", self.foot_tock)
-        foot_form.addRow("Every N cycles", self.foot_every)
+        foot_form.addRow(t("Text", "文本"), self.foot_text)
+        foot_form.addRow(t("Tick labels", "Tick 标签"), self.foot_tick)
+        foot_form.addRow(t("Tock labels", "Tock 标签"), self.foot_tock)
+        foot_form.addRow(t("Every N cycles", "每 N 个周期"), self.foot_every)
         layout.addWidget(foot_box)
 
         note = QLabel(
@@ -560,8 +597,8 @@ class DiagramSettingsDialog(QDialog):
         layout.addWidget(note)
         layout.addStretch(1)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Apply" if language != "zh" else "应用")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消" if language == "zh" else "Cancel")
+        buttons.button(QDialogButtonBox.Ok).setText(t("Apply", "应用"))
+        buttons.button(QDialogButtonBox.Cancel).setText(t("Cancel", "取消"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)

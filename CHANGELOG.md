@@ -2,6 +2,30 @@
 
 All notable changes to WaveDromGen are documented here.
 
+## [2.3.0] — 2026-10-31
+
+Palette and localisation polish for the v2.2 waveform editor.
+
+### Added
+
+- **Group / Ungroup buttons** in the waveform palette, in addition to
+  <kbd>Ctrl</kbd>+<kbd>G</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd>.
+- The palette now follows the familiar WaveDrom grouping and colour scheme:
+  levels (`0 1 x z .`), buses (`= 2 3 4 5 6 7 8 9 u d`), clocks
+  (`p n P N h l H L`) and specials (`| < >`), separated by group dividers under
+  a “Draw / 绘制” label.
+- Context-sensitive clipboard on the canvas: <kbd>Ctrl</kbd>+<kbd>C</kbd> /
+  <kbd>Ctrl</kbd>+<kbd>V</kbd> copy/paste the waveform block when cells are
+  selected, and whole WaveJSON signals/groups when signal rows are selected.
+- Full Chinese localisation of the Preferences dialog (general and shortcut
+  tabs), the Diagram Settings dialog and the Signal Properties dialog.
+
+### Changed
+
+- When several signal rows are selected, the JSON editor now highlights only
+  the corresponding `wave` strings instead of selecting all the JSON text in
+  between.
+
 ## [2.2.0] — 2026-10-30
 
 Editing polish: a waveform palette, multi-lane insert mode and rectangular block

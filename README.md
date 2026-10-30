@@ -1,6 +1,6 @@
 <p align="center"><img src="asset/md/logo.png" width="96" alt="WaveDromGen logo"></p>
 
-# WaveDromGen v2.2
+# WaveDromGen v2.3
 
 **A GUI digital timing-diagram editor with WaveDrom-compatible rendering, a live JSON editor and direct waveform manipulation.**
 
@@ -71,7 +71,7 @@ executables are attached to the [releases](https://github.com/Nymph-K/wavedromge
 - **Document tabs** — one tab per open WaveJSON file; close with <kbd>Ctrl</kbd>+<kbd>W</kbd> and switch with <kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd>.
 - **Menu bar** — File, Edit, Signal, View, Tools, Help.
 - **Main toolbar** — file actions, undo/redo, signal operations, view modes, zoom, theme, settings.
-- **Wave palette** — one clickable button per common wave character, plus insert-cycle-left/right, delete-cycle, empty `{}` row and the `INS` insert-mode toggle.
+- **Wave palette** — grouped, colour-coded buttons for every common wave character (levels, buses, clocks and specials) under a “Draw” label, plus Group/Ungroup, insert-cycle-left/right, delete-cycle, empty `{}` row and the `INS` insert-mode toggle.
 - **Tool rail** — Select, Clock, Signal, Bus, Unknown, High-Z, Gap, Text, Clear and Node tools.
 - **Wave canvas** — a time ruler, signal gutter with drag handles and group brackets, snap-to-cell selection, an insert caret and inline label editors.
 - **WaveJSON panel** — live editor with a `Live` badge, apply/format/wrap/copy buttons and an error banner.
@@ -120,9 +120,9 @@ Click a cell, drag to select a rectangle, or use <kbd>Shift</kbd>+arrows / <kbd>
 | `\|` | Gap marker |
 | `<`, `>` | Sub-cycle (sharp) transitions |
 
-When a single cell is selected, typing advances the cursor to the next cycle — including when the typed character is the same as the current cell. This is controlled by **Preferences → Behaviour → “After typing any waveform character, jump to the next cycle”**. Use **Edit → Copy Cells** / **Paste Cells** for rectangular blocks: a copied 3×2 block is pasted as a 3×2 block, and pasting a single line into one cell fills several cycles.
+When a single cell is selected, typing advances the cursor to the next cycle — including when the typed character is the same as the current cell. This is controlled by **Preferences → Behaviour → “After typing any waveform character, jump to the next cycle”**. <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd> are context-sensitive: with a waveform block selected they copy/paste the block (a copied 3×2 block is pasted as a 3×2 block, and pasting a single line into one cell fills several cycles); with signal rows selected they copy/paste the complete WaveJSON signal objects. **Edit → Copy Cells** / **Paste Cells** still force the waveform-block behaviour.
 
-The **wave palette** above the canvas writes any of the common characters (`0 1 x . z = 2 3 4 5 p n u d h l`) to the current selection with one click.
+The **wave palette** above the canvas writes any of the common characters to the current selection with one click. Its buttons are grouped and colour-coded like the WaveDrom editor — levels (`0 1 x z .`), buses (`= 2 3 4 5 6 7 8 9 u d`), clocks (`p n P N h l H L`) and specials (`| < >`) — and the palette also carries the Group/Ungroup, insert-cycle, delete-cycle, empty-row and insert-mode buttons.
 
 ### Deleting and inserting cycles
 
@@ -211,7 +211,7 @@ Use the **Node** tool to place a one-character node marker on a waveform cell, t
 
 ## WaveJSON compatibility
 
-WaveDromGen v2.2 preserves the WaveJSON fields it understands and unknown fields it does not. It supports:
+WaveDromGen v2.3 preserves the WaveJSON fields it understands and unknown fields it does not. It supports:
 
 - `signal` lanes with `name`, `wave`, `data` (string or array), `node`, `period`, `phase` and extra fields;
 - **named signal groups**, including nested groups, kept as arrays instead of being flattened;
@@ -259,7 +259,7 @@ The waveform renderer is a direct port of WaveDrom's brick and data-marker algor
 python -m unittest discover -s tests -v
 ```
 
-The suite covers the WaveDrom brick port, clock extension and shrinking, groups and nested groups, empty rows, JSON/JSON5 handling and round-trips, lane-scoped cell edits, rectangular block paste, undo/redo, settings and shortcuts, plus offscreen GUI tests for inline editing and Enter/Tab navigation, drag/drop ordering, range painting (including empty cycles right of the lane end), the wave palette, middle-drag multi-lane insert, the insert caret, signal and group clipboard operations, multi-row editor selection, tabs and cross-tab paste, dark-skin switching, live JSON, split views, save/reopen and PNG/SVG export.
+The suite covers the WaveDrom brick port, clock extension and shrinking, groups and nested groups, empty rows, JSON/JSON5 handling and round-trips, lane-scoped cell edits, rectangular block paste, undo/redo, settings and shortcuts, plus offscreen GUI tests for inline editing and Enter/Tab navigation, drag/drop ordering, range painting (including empty cycles right of the lane end), the grouped wave palette and palette actions, contextual Ctrl+C/Ctrl+V, middle-drag multi-lane insert, the insert caret, signal and group clipboard operations, wave-string-only editor highlighting, Chinese dialog labels, tabs and cross-tab paste, dark-skin switching, live JSON, split views, save/reopen and PNG/SVG export.
 
 ---
 
